@@ -4,9 +4,9 @@ from typing import Dict, Optional
 
 @dataclass
 class IncomingData:
+    jobId: str
     file_upload_path: str
     user_id: str
-    tdei_project_group_id: str
 
 
 @dataclass

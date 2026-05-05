@@ -9,9 +9,9 @@ class TestQueueMessageContent(unittest.TestCase):
             "messageId": "mid-1",
             "messageType": "workflow_identifier",
             "data": {
+                "jobId": "job-1",
                 "file_upload_path": "https://example.com/archive.zip",
                 "user_id": "user-1",
-                "tdei_project_group_id": "group-1",
             },
         }
 
@@ -20,9 +20,9 @@ class TestQueueMessageContent(unittest.TestCase):
         self.assertEqual(result.messageId, "mid-1")
         self.assertEqual(result.messageType, "workflow_identifier")
         self.assertIsInstance(result.data, IncomingData)
+        self.assertEqual(result.data.jobId, "job-1")
         self.assertEqual(result.data.file_upload_path, "https://example.com/archive.zip")
         self.assertEqual(result.data.user_id, "user-1")
-        self.assertEqual(result.data.tdei_project_group_id, "group-1")
 
     def test_from_dict_handles_missing_data(self):
         payload = {"messageId": "mid-2", "messageType": "workflow_identifier"}

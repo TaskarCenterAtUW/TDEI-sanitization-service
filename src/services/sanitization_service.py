@@ -1,10 +1,10 @@
 import gc
+import json
 import os
 import signal
 import shutil
 import threading
 import time
-import uuid
 from typing import Dict
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
@@ -63,21 +63,22 @@ class SanitizationService:
             self._stop_server_and_container(delay_seconds=2)
 
     def process_message(self, request_msg: RequestMessage) -> None:
-        job_id = request_msg.messageId or str(uuid.uuid4()).replace("-", "")
+        job_id = request_msg.data.jobId if request_msg.data else None
         input_path = request_msg.data.file_upload_path if request_msg.data else None
         success = False
         message = ""
-        sanitized_url = ""
-        metadata: Dict = {}
+        updated_dataset_path = ""
+        metadata_path = ""
 
-        job_work_dir = os.path.join(self._config.get_download_directory(), job_id)
+        job_work_dir = os.path.join(self._config.get_download_directory(), job_id or "unknown-job")
         local_input_file = None
-        local_output_zip = None
 
         try:
             Logger.info(f"Message ID: {request_msg.messageId}")
             if not request_msg.data:
                 raise ValueError("Invalid message: missing data")
+            if not job_id:
+                raise ValueError("Missing jobId in request data")
 
             if not input_path:
                 raise ValueError("No file_upload_path found in request")
@@ -86,16 +87,23 @@ class SanitizationService:
                 local_input_file = self.download_input_file(input_path=input_path, job_id=job_id)
             except Exception as exc:
                 raise RuntimeError(f"Download failed: {exc}") from exc
-            success, message, local_output_zip, metadata = SanitizationProcessor.sanitize_dataset(
-                input_file_path=local_input_file,
-                work_directory=job_work_dir,
+            sanitization_result = SanitizationProcessor.sanitize_dataset(
+                input_zip_path=local_input_file,
+                output_dir=job_work_dir,
             )
+            success = sanitization_result["success"]
+            message = sanitization_result["message"]
 
-            if success and local_output_zip:
-                sanitized_url = self.upload_to_azure(job_id=job_id, file_path=local_output_zip) or ""
-                success = bool(sanitized_url)
+            if success:
+                updated_dataset_zip = sanitization_result["updated_dataset_zip"]
+                metadata_json = sanitization_result["metadata_json"]
+                self.update_metadata_job_id(metadata_json, job_id)
+
+                updated_dataset_path = self.upload_to_azure(job_id=job_id, file_path=updated_dataset_zip) or ""
+                metadata_path = self.upload_metadata_json(job_id=job_id, metadata_file_path=metadata_json) or ""
+                success = bool(updated_dataset_path and metadata_path)
                 if not success:
-                    message = "Sanitization output upload failed"
+                    message = "Failed to upload sanitized dataset artifacts"
 
             if not success and not message:
                 message = "Sanitization failed"
@@ -109,11 +117,11 @@ class SanitizationService:
                 valid=success,
                 status_message=message,
                 request_message=request_msg,
-                sanitized_dataset_url=sanitized_url,
+                sanitization_dataset_url=updated_dataset_path,
+                metadata_url=metadata_path,
                 original_file_upload_path=input_path or "",
-                metadata=metadata,
             )
-            # self.cleanup(path=job_work_dir)
+            self.cleanup(path=job_work_dir)
             gc.collect()
 
     def send_status(
@@ -121,9 +129,9 @@ class SanitizationService:
         valid: bool,
         status_message: str,
         request_message: RequestMessage,
-        sanitized_dataset_url: str,
+        sanitization_dataset_url: str,
+        metadata_url: str,
         original_file_upload_path: str,
-        metadata: Dict,
     ) -> None:
         Logger.info(
             f"Publishing message ID: {request_message.messageId} with status: {valid}"
@@ -132,11 +140,11 @@ class SanitizationService:
         response_message = {
             "file_upload_path": original_file_upload_path,
             "user_id": request_message.data.user_id if request_message.data else "",
-            "tdei_project_group_id": request_message.data.tdei_project_group_id if request_message.data else "",
+            "jobId": request_message.data.jobId if request_message.data else "",
             "success": valid,
             "message": status_message if status_message else ("Success" if valid else "Failed"),
-            "sanitization_dataset_url": sanitized_dataset_url if valid else "",
-            "metadata": metadata if valid else {},
+            "sanitization_dataset_url": sanitization_dataset_url if valid else "",
+            "metadata_url": metadata_url if valid else "",
         }
 
         data = QueueMessage.data_from(
@@ -188,12 +196,37 @@ class SanitizationService:
             file = container.create_file(name=target_file_remote_path)
             with open(file_path, "rb") as data:
                 file.upload(data)
-            uploaded_path = file.get_remote_url()
-            Logger.info(f"File uploaded to Azure: {uploaded_path}")
-            return uploaded_path
+            uploaded_url = file.get_remote_url()
+            Logger.info(f"File uploaded to Azure: {uploaded_url}")
+            return uploaded_url
         except Exception as exc:
             Logger.error(f"Upload failed: {exc}")
             return None
+
+    def upload_metadata_json(self, job_id: str, metadata_file_path: str):
+        Logger.info(f"Uploading metadata JSON for job: {job_id}")
+        try:
+            target_directory = f"jobs/{job_id}"
+            target_file_remote_path = f"{target_directory}/metadata.json"
+
+            container = self.storage_client.get_container(container_name=self.container_name)
+            file = container.create_file(name=target_file_remote_path)
+            with open(metadata_file_path, "rb") as metadata_file:
+                file.upload(metadata_file)
+            uploaded_url = file.get_remote_url()
+            Logger.info(f"Metadata uploaded to Azure: {uploaded_url}")
+            return uploaded_url
+        except Exception as exc:
+            Logger.error(f"Metadata upload failed: {exc}")
+            return None
+
+    @staticmethod
+    def update_metadata_job_id(metadata_file_path: str, job_id: str) -> None:
+        with open(metadata_file_path, "r", encoding="utf-8") as metadata_file:
+            metadata = json.load(metadata_file)
+        metadata["jobId"] = job_id
+        with open(metadata_file_path, "w", encoding="utf-8") as metadata_file:
+            json.dump(metadata, metadata_file, indent=2, ensure_ascii=True)
 
     def cleanup(self, path: str) -> None:
         if os.path.exists(path):

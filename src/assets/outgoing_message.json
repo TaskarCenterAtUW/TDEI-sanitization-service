@@ -4,19 +4,10 @@
   "data": {
     "file_upload_path": "https://tdeisamplestorage.blob.core.windows.net/tdei-storage-test/Archivew.zip",
     "user_id": "c59d29b6-a063-4249-943f-d320d15ac9ab",
-    "tdei_project_group_id": "0b41ebc5-350c-42d3-90af-3af4ad3628fb",
+    "jobId": "<job_id>",
     "success": true,
-    "message": "",
-    "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/test_upload/valid.zip",
-    "metadata": {
-      "sanitized_features": [
-        "example_feature_1",
-        "example_feature_2"
-      ],
-      "sanitized_tags": [
-        "example_tag_1",
-        "example_tag_2"
-      ]
-    }
+    "message": "<sanitization_message>",
+    "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/<jobId>/filename.zip",
+    "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/<jobId>/metadata.json"
   }
 }

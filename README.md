@@ -1,64 +1,204 @@
-# TDEI-sanitization-service
+# TDEI Sanitization Service
 
-FastAPI service that listens to an Azure topic subscription, sanitizes incoming dataset zip files, uploads sanitized zip to Azure Blob Storage, and publishes the result to an Azure response topic.
+A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW/GeoJSON dataset ZIP files, uploads the cleaned artifacts to Azure Blob Storage, and publishes the result back to a response topic.
 
-## Features
-- FastAPI app with health endpoints
-- Startup queue subscriber listener
-- Incoming message contract support:
-  - `messageId`
-  - `messageType`
-  - `data.file_upload_path`
-  - `data.user_id`
-  - `data.tdei_project_group_id`
-- Sanitization placeholder module (`src/sanitization/processor.py`) where exact logic can be added
-- Upload sanitized zip to Azure Blob on success
-- Publish outgoing status message to response topic
+---
 
-## Environment variables
-Copy `.env.example` to `.env` and set:
+## What it does
 
-```bash
-PROVIDER=Azure
-QUEUECONNECTION=xxx
-STORAGECONNECTION=xxx
-SANATIZATION_REQ_TOPIC=xxx
-SANATIZATION_REQ_SUB=xxx
-SANATIZATION_RES_TOPIC=xxx
-CONTAINER_NAME=osw
-MAX_CONCURRENT_MESSAGES=2
-MAX_RECEIVABLE_MESSAGES=-1
-TOPIC_CALLBACK_EXECUTION_MODE=thread
+1. **Subscribes** to an Azure Service Bus topic for incoming sanitization requests.
+2. **Downloads** the dataset ZIP from the URL in the message.
+3. **Extracts** the ZIP and processes every `.geojson` file inside it:
+   - Removes properties whose value is `null`, `NaN`, or a NaN-like string (`"nan"`, `"none"`, `"null"`, `"n/a"`, `"na"`).
+   - Normalizes all geometry coordinate values to exactly **7 decimal places** (truncates if more, pads with trailing zeroes if fewer).
+   - Skips macOS resource-fork files (`__MACOSX/`, `._*`, `.DS_Store`).
+4. **Writes** a `metadata.json` file that records every removed tag and every coordinate that was adjusted.
+5. **Repackages** the sanitized files into a new ZIP.
+6. **Uploads** both artifacts to Azure Blob Storage under `jobs/<jobId>/`.
+7. **Publishes** an outgoing message to a response topic with the result status and blob URLs.
+
+---
+
+## How it works
+
+```
+Azure Service Bus (request topic)
+        │
+        ▼
+  SanitizationService.subscribe()
+        │  deserialises message → RequestMessage
+        ▼
+  SanitizationService.process_message()
+        │  validates jobId and file_upload_path
+        │  downloads ZIP  →  SanitizationProcessor.sanitize_dataset()
+        │                         ├─ extracts ZIP
+        │                         ├─ per .geojson file:
+        │                         │     remove null/NaN props
+        │                         │     normalise coords → 7 d.p.
+        │                         │     record changes
+        │                         ├─ write metadata.json
+        │                         └─ repack sanitised ZIP
+        │  uploads ZIP     →  jobs/<jobId>/<filename>.zip
+        │  uploads metadata →  jobs/<jobId>/metadata.json
+        ▼
+Azure Service Bus (response topic)
 ```
 
-`MAX_RECEIVABLE_MESSAGES` behavior:
-- `-1` means no limit (service keeps running).
-- `> 0` means process only that many receivable messages, then stop the server/container.
+### Sanitization messages
 
-`TOPIC_CALLBACK_EXECUTION_MODE=thread` avoids macOS fork-based callback worker crashes.
+| What changed | Message |
+|---|---|
+| Nothing | `No changes were needed. The dataset is already clean.` |
+| Coordinates only | `Coordinates were standardized for consistency.` |
+| Null/NaN tags only | `Invalid or empty values were removed from the dataset.` |
+| Both | `Dataset was cleaned and coordinates were standardized.` |
 
-## Run
+### Metadata format
+
+```json
+{
+  "jobId": "0001",
+  "files": [
+    {
+      "filename": "edges.geojson",
+      "removedTags": [
+        { "featureIndex": 0, "tag": "width", "value": null }
+      ],
+      "precisionUpdates": [
+        {
+          "featureIndex": 0,
+          "coordinatePath": "geometry.coordinates[0]",
+          "original": "-122.123456789",
+          "updated": "-122.1234567"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## Message contracts
+
+### Incoming
+
+```json
+{
+  "messageId": "4",
+  "messageType": "workflow_identifier",
+  "data": {
+    "jobId": "0001",
+    "file_upload_path": "https://tdeisamplestorage.blob.core.windows.net/tdei-storage-test/Archivew.zip",
+    "user_id": "c59d29b6-a063-4249-943f-d320d15ac9ab"
+  }
+}
+```
+
+### Outgoing
+
+```json
+{
+  "messageId": "c8c76e89f30944d2b2abd2491bd95337",
+  "messageType": "workflow_identifier",
+  "data": {
+    "jobId": "0001",
+    "file_upload_path": "https://tdeisamplestorage.blob.core.windows.net/tdei-storage-test/Archivew.zip",
+    "user_id": "c59d29b6-a063-4249-943f-d320d15ac9ab",
+    "success": true,
+    "message": "Coordinates were standardized for consistency.",
+    "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/Archivew.zip",
+    "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/metadata.json"
+  }
+}
+```
+
+---
+
+## Required environment variables
+
+Copy `.env.example` to `.env` and fill in the values:
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PROVIDER` | Yes | — | Cloud provider. Set to `Azure`. |
+| `QUEUECONNECTION` | Yes | — | Azure Service Bus connection string. |
+| `STORAGECONNECTION` | Yes | — | Azure Blob Storage connection string. |
+| `SANATIZATION_REQ_TOPIC` | Yes | — | Service Bus topic to subscribe to for requests. |
+| `SANATIZATION_REQ_SUB` | Yes | — | Subscription name on the request topic. |
+| `SANATIZATION_RES_TOPIC` | Yes | — | Service Bus topic to publish responses to. |
+| `CONTAINER_NAME` | No | `osw` | Blob Storage container where uploads go. |
+| `MAX_CONCURRENT_MESSAGES` | No | `2` | Maximum messages processed in parallel. |
+| `MAX_RECEIVABLE_MESSAGES` | No | `-1` | `-1` = run indefinitely. Any positive integer = stop after that many messages. |
+
+---
+
+## Running the application
+
 ```bash
+# 1. Create and activate a virtual environment
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # macOS / Linux
+# .venv\Scripts\activate         # Windows
+
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Configure environment
+cp .env.example .env
+# Edit .env with your Azure connection strings
+
+# 4. Start the service
 uvicorn src.main:app --reload
 ```
 
+The service starts on `http://localhost:8000`. On startup it immediately begins listening to the configured Service Bus topic.
+
+### Docker
+
+```bash
+docker build -t tdei-sanitization-service .
+docker run --env-file .env -p 8000:8000 tdei-sanitization-service
+```
+
+---
+
 ## Health endpoints
-- `GET /`
-- `GET /health`
-- `GET /ping`
-- `POST /ping`
-- `GET /health/ping`
-- `POST /health/ping`
 
-## Message contracts
-- Incoming example: `src/assets/incoming_message.json`
-- Outgoing example: `src/assets/outgoing_message.json`
+| Method | Path | Response |
+|---|---|---|
+| `GET` | `/` | `"I'm healthy !!"` |
+| `GET` | `/health` | `"I'm healthy !!"` |
+| `GET` | `/ping` | `"I'm healthy !!"` |
+| `POST` | `/ping` | `"I'm healthy !!"` |
+| `GET` | `/health/ping` | `"I'm healthy !!"` |
+| `POST` | `/health/ping` | `"I'm healthy !!"` |
 
-## Where to add real sanitization logic
-Implement exact sanitization in:
-- `src/sanitization/processor.py`
+---
 
-Current placeholder behavior copies the input zip to `sanitized_<original_name>.zip`.
+## Running unit tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+### Running with coverage
+
+```bash
+# Install coverage if not already present
+pip install coverage
+
+# Run tests and collect coverage (example.py is excluded)
+python -m coverage run --rcfile=.coveragerc -m unittest discover -s tests
+
+# Print a summary report
+python -m coverage report
+
+# Generate an HTML report (opens in browser)
+python -m coverage html
+open htmlcov/index.html
+```
+
+Coverage is configured in [`.coveragerc`](.coveragerc) to measure `src/` and exclude `src/example.py`.
+
+Current coverage: **100%** across all source modules.
