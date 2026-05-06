@@ -1,0 +1,6 @@
+python-ms-core==0.0.25
+fastapi
+uvicorn
+pydantic-settings
+python-dotenv
+psutil
