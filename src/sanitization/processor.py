@@ -1,0 +1,252 @@
+import json
+import math
+import os
+import shutil
+import zipfile
+from decimal import Decimal, ROUND_DOWN
+from typing import Any, Dict, List
+
+from src.logger import Logger
+
+
+class SanitizationProcessor:
+    COORDINATE_QUANTIZER = Decimal("0.0000000")
+    NAN_STRINGS = {"nan", "none", "null", "n/a", "na"}
+    GEOJSON_ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
+
+    @classmethod
+    def sanitize_dataset(cls, input_zip_path: str, output_dir: str) -> Dict[str, Any]:
+        """
+        Sanitize a dataset zip and create a sanitized zip plus metadata json.
+        """
+        try:
+            if not input_zip_path:
+                return cls._failure("Input dataset path is missing")
+
+            if not os.path.isfile(input_zip_path):
+                return cls._failure(f"Input dataset not found at path: {input_zip_path}")
+
+            os.makedirs(output_dir, exist_ok=True)
+            extraction_dir = os.path.join(output_dir, "extracted")
+            sanitized_root_dir = os.path.join(output_dir, "sanitized")
+            os.makedirs(extraction_dir, exist_ok=True)
+            os.makedirs(sanitized_root_dir, exist_ok=True)
+
+            with zipfile.ZipFile(input_zip_path, "r") as zip_file:
+                zip_file.extractall(extraction_dir)
+
+            dataset_root = cls._resolve_dataset_root(extraction_dir)
+            metadata: Dict[str, Any] = {
+                "jobId": "",
+                "files": [],
+            }
+            change_summary = {
+                "removed_values": False,
+                "precision_updates": False,
+            }
+
+            for current_root, _, files in os.walk(dataset_root):
+                relative_root = os.path.relpath(current_root, dataset_root)
+                if cls._should_skip_relative_path(relative_root):
+                    continue
+                sanitized_root = sanitized_root_dir if relative_root == "." else os.path.join(sanitized_root_dir, relative_root)
+                os.makedirs(sanitized_root, exist_ok=True)
+
+                for filename in files:
+                    if cls._should_skip_filename(filename):
+                        continue
+                    source_path = os.path.join(current_root, filename)
+                    target_path = os.path.join(sanitized_root, filename)
+                    if filename.lower().endswith(".geojson"):
+                        file_metadata = cls._sanitize_geojson_file(source_path, target_path)
+                        metadata["files"].append(file_metadata)
+                        if file_metadata["removedTags"]:
+                            change_summary["removed_values"] = True
+                        if file_metadata["precisionUpdates"]:
+                            change_summary["precision_updates"] = True
+                    else:
+                        shutil.copy2(source_path, target_path)
+
+            metadata_json_path = os.path.join(output_dir, "metadata.json")
+            with open(metadata_json_path, "w", encoding="utf-8") as metadata_file:
+                json.dump(metadata, metadata_file, indent=2, ensure_ascii=True)
+
+            input_filename = os.path.basename(input_zip_path)
+            updated_dataset_zip = os.path.join(output_dir, input_filename)
+            cls._create_zip_from_directory(sanitized_root_dir, updated_dataset_zip)
+
+            return {
+                "success": True,
+                "message": cls._build_message(change_summary),
+                "updated_dataset_zip": updated_dataset_zip,
+                "metadata_json": metadata_json_path,
+            }
+        except Exception as exc:
+            Logger.error(f"Sanitization failed: {exc}")
+            return cls._failure(f"Sanitization failed: {exc}")
+
+    @classmethod
+    def _sanitize_geojson_file(cls, source_path: str, target_path: str) -> Dict[str, Any]:
+        payload = cls._load_geojson_payload(source_path)
+
+        file_metadata = {
+            "filename": os.path.basename(source_path),
+            "removedTags": [],
+            "precisionUpdates": [],
+        }
+
+        features = payload.get("features", [])
+        for feature_index, feature in enumerate(features):
+            properties = feature.get("properties") or {}
+            sanitized_properties = {}
+            for tag, value in properties.items():
+                if cls._should_remove_value(value):
+                    file_metadata["removedTags"].append(
+                        {
+                            "featureIndex": feature_index,
+                            "tag": tag,
+                            "value": value,
+                        }
+                    )
+                    continue
+                sanitized_properties[tag] = value
+            feature["properties"] = sanitized_properties
+
+            geometry = feature.get("geometry")
+            if geometry and "coordinates" in geometry:
+                geometry["coordinates"] = cls._sanitize_coordinates(
+                    geometry["coordinates"],
+                    feature_index,
+                    "geometry.coordinates",
+                    file_metadata["precisionUpdates"],
+                )
+
+        with open(target_path, "w", encoding="utf-8") as sanitized_geojson:
+            sanitized_geojson.write(cls._json_dumps_with_decimal(payload))
+
+        return file_metadata
+
+    @classmethod
+    def _sanitize_coordinates(
+        cls,
+        coordinates: Any,
+        feature_index: int,
+        coordinate_path: str,
+        precision_updates: List[Dict[str, Any]],
+    ) -> Any:
+        if isinstance(coordinates, list):
+            sanitized_coordinates = []
+            for index, item in enumerate(coordinates):
+                child_path = f"{coordinate_path}[{index}]"
+                sanitized_coordinates.append(
+                    cls._sanitize_coordinates(item, feature_index, child_path, precision_updates)
+                )
+            return sanitized_coordinates
+
+        if isinstance(coordinates, (int, float)):
+            normalized, changed, original_text, updated_text = cls._normalize_coordinate(float(coordinates))
+            if changed:
+                precision_updates.append(
+                    {
+                        "featureIndex": feature_index,
+                        "coordinatePath": coordinate_path,
+                        "original": original_text,
+                        "updated": updated_text,
+                    }
+                )
+            return normalized
+
+        return coordinates
+
+    @classmethod
+    def _normalize_coordinate(cls, value: float) -> Any:
+        decimal_value = Decimal(str(value))
+        normalized_decimal = decimal_value.quantize(cls.COORDINATE_QUANTIZER, rounding=ROUND_DOWN)
+        original_fraction = format(decimal_value, "f").partition(".")[2]
+        normalized_value = float(normalized_decimal)
+        changed = normalized_value != value or len(original_fraction) != 7
+        original_text = format(decimal_value, "f")
+        updated_text = format(normalized_decimal, "f")
+        return normalized_decimal, changed, original_text, updated_text
+
+    @classmethod
+    def _should_remove_value(cls, value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, float) and math.isnan(value):
+            return True
+        if isinstance(value, str) and value.strip().lower() in cls.NAN_STRINGS:
+            return True
+        return False
+
+    @staticmethod
+    def _resolve_dataset_root(extraction_dir: str) -> str:
+        children = os.listdir(extraction_dir)
+        if len(children) == 1:
+            candidate = os.path.join(extraction_dir, children[0])
+            if os.path.isdir(candidate):
+                return candidate
+        return extraction_dir
+
+    @staticmethod
+    def _create_zip_from_directory(source_dir: str, zip_path: str) -> None:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for current_root, _, files in os.walk(source_dir):
+                for filename in files:
+                    file_path = os.path.join(current_root, filename)
+                    arcname = os.path.relpath(file_path, source_dir)
+                    zip_file.write(file_path, arcname)
+
+    @staticmethod
+    def _build_message(change_summary: Dict[str, bool]) -> str:
+        removed_values = change_summary["removed_values"]
+        precision_updates = change_summary["precision_updates"]
+        if removed_values and precision_updates:
+            return "Dataset was cleaned and coordinates were standardized."
+        if precision_updates:
+            return "Coordinates were standardized for consistency."
+        if removed_values:
+            return "Invalid or empty values were removed from the dataset."
+        return "No changes were needed. The dataset is already clean."
+
+    @staticmethod
+    def _failure(message: str) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "message": message,
+            "updated_dataset_zip": None,
+            "metadata_json": None,
+        }
+
+    @staticmethod
+    def _should_skip_filename(filename: str) -> bool:
+        return filename.startswith("._") or filename == ".DS_Store"
+
+    @staticmethod
+    def _should_skip_relative_path(relative_path: str) -> bool:
+        return relative_path == "__MACOSX" or relative_path.startswith("__MACOSX" + os.sep)
+
+    @classmethod
+    def _load_geojson_payload(cls, source_path: str) -> Dict[str, Any]:
+        last_error = None
+        for encoding in cls.GEOJSON_ENCODINGS:
+            try:
+                with open(source_path, "r", encoding=encoding) as geojson_file:
+                    return json.load(geojson_file)
+            except UnicodeDecodeError as exc:
+                last_error = exc
+                continue
+        raise last_error or UnicodeDecodeError("utf-8", b"", 0, 1, "Unable to decode GeoJSON file")
+
+    @classmethod
+    def _json_dumps_with_decimal(cls, value: Any) -> str:
+        if isinstance(value, dict):
+            items = []
+            for key, item in value.items():
+                items.append(f"{json.dumps(key, ensure_ascii=True)}:{cls._json_dumps_with_decimal(item)}")
+            return "{" + ",".join(items) + "}"
+        if isinstance(value, list):
+            return "[" + ",".join(cls._json_dumps_with_decimal(item) for item in value) + "]"
+        if isinstance(value, Decimal):
+            return format(value, "f")
+        return json.dumps(value, ensure_ascii=True, allow_nan=False)

@@ -1,0 +1,9 @@
+{
+  "messageId": "4",
+  "messageType": "workflow_identifier",
+  "data": {
+    "jobId": "0001",
+    "file_upload_path": "https://tdeisamplestorage.blob.core.windows.net/tdei-storage-test/Archivew.zip",
+    "user_id": "c59d29b6-a063-4249-943f-d320d15ac9ab"
+  }
+}
