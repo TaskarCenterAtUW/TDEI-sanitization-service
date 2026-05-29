@@ -1,4 +1,7 @@
 # TDEI Sanitization Service
+[![Unit Tests](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/actions/workflows/unit_tests.yaml/badge.svg)](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/actions/workflows/unit_tests.yaml)
+[![Coverage](https://raw.githubusercontent.com/TaskarCenterAtUW/TDEI-sanitization-service/badges/coverage.svg)](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/tree/badges)
+[![python-ms-core](https://img.shields.io/pypi/v/python-ms-core?label=python-ms-core&cacheSeconds=60&t=1)](https://pypi.org/project/python-ms-core/)
 
 A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW/GeoJSON dataset ZIP files, uploads the cleaned artifacts to Azure Blob Storage, and publishes the result back to a response topic.
 
@@ -9,7 +12,7 @@ A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW
 1. **Subscribes** to an Azure Service Bus topic for incoming sanitization requests.
 2. **Downloads** the dataset ZIP from the URL in the message.
 3. **Extracts** the ZIP and processes every `.geojson` file inside it:
-   - Removes properties whose value is `null`, `NaN`, or a NaN-like string (`"nan"`, `"none"`, `"null"`, `"n/a"`, `"na"`).
+   - Removes properties whose value is JSON `null` or a numeric `NaN`; string values such as `"None"`, `"nan"`, `"none"`, `"null"`, `"n/a"`, and `"na"` are preserved.
    - Normalizes all geometry coordinate values to exactly **7 decimal places** (truncates if more, pads with trailing zeroes if fewer).
    - Skips macOS resource-fork files (`__MACOSX/`, `._*`, `.DS_Store`).
 4. **Writes** a `metadata.json` file that records every removed tag and every coordinate that was adjusted.
