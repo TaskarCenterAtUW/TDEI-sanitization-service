@@ -11,7 +11,6 @@ from src.logger import Logger
 
 class SanitizationProcessor:
     COORDINATE_QUANTIZER = Decimal("0.0000000")
-    NAN_STRINGS = {"nan", "none", "null", "n/a", "na"}
     GEOJSON_ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
 
     @classmethod
@@ -174,8 +173,6 @@ class SanitizationProcessor:
         if value is None:
             return True
         if isinstance(value, float) and math.isnan(value):
-            return True
-        if isinstance(value, str) and value.strip().lower() in cls.NAN_STRINGS:
             return True
         return False
 
