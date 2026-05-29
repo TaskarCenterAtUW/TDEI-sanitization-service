@@ -224,16 +224,23 @@ class TestSanitizationProcessor(unittest.TestCase):
             with zipfile.ZipFile(result["updated_dataset_zip"], "r") as zf:
                 self.assertIn("edges.geojson", zf.namelist())
 
-    def test_geojson_with_nan_like_string_property_removed(self):
-        for nan_str in ["nan", "NaN", "null", "none", "n/a", "na"]:
-            with self.subTest(value=nan_str):
-                payload = self._feature_collection(
-                    properties={"name": "edge", "bad_tag": nan_str},
-                    coordinates=[-122.1234567, 47.1234567],
-                )
-                result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
-                self.assertNotIn("bad_tag", sanitized_payload["features"][0]["properties"])
-                self.assertEqual(metadata["files"][0]["removedTags"][0]["tag"], "bad_tag")
+    def test_geojson_with_none_string_property_preserved(self):
+        self._assert_string_property_preserved("None")
+
+    def test_geojson_with_nan_string_property_preserved(self):
+        self._assert_string_property_preserved("nan")
+
+    def test_geojson_with_none_lowercase_string_property_preserved(self):
+        self._assert_string_property_preserved("none")
+
+    def test_geojson_with_null_string_property_preserved(self):
+        self._assert_string_property_preserved("null")
+
+    def test_geojson_with_n_a_string_property_preserved(self):
+        self._assert_string_property_preserved("n/a")
+
+    def test_geojson_with_na_string_property_preserved(self):
+        self._assert_string_property_preserved("na")
 
     def test_sanitize_coordinates_ignores_non_numeric_non_list(self):
         updates = []
@@ -273,6 +280,18 @@ class TestSanitizationProcessor(unittest.TestCase):
                 metadata = json.load(metadata_file)
 
             return result, sanitized_payload, metadata, raw_text
+
+    def _assert_string_property_preserved(self, string_value):
+        payload = self._feature_collection(
+            properties={"name": "edge", "bad_tag": string_value},
+            coordinates=[-122.1234567, 47.1234567],
+        )
+
+        result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertEqual(sanitized_payload["features"][0]["properties"]["bad_tag"], string_value)
+        self.assertEqual(result["message"], "No changes were needed. The dataset is already clean.")
+        self.assertEqual(metadata["files"][0]["removedTags"], [])
 
     @staticmethod
     def _feature_collection(properties, coordinates):
