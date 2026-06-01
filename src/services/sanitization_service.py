@@ -83,30 +83,32 @@ class SanitizationService:
             if not input_path:
                 raise ValueError("No file_upload_path found in request")
 
-            try:
-                local_input_file = self.download_input_file(input_path=input_path, job_id=job_id)
-            except Exception as exc:
-                raise RuntimeError(f"Download failed: {exc}") from exc
-            sanitization_result = SanitizationProcessor.sanitize_dataset(
-                input_zip_path=local_input_file,
-                output_dir=job_work_dir,
-            )
-            success = sanitization_result["success"]
-            message = sanitization_result["message"]
+            with Logger.timer(f"process_message (job_id={job_id})"):
+                try:
+                    local_input_file = self.download_input_file(input_path=input_path, job_id=job_id)
+                except Exception as exc:
+                    raise RuntimeError(f"Download failed: {exc}") from exc
+                with Logger.timer(f"sanitize_dataset (job_id={job_id})"):
+                    sanitization_result = SanitizationProcessor.sanitize_dataset(
+                        input_zip_path=local_input_file,
+                        output_dir=job_work_dir,
+                    )
+                success = sanitization_result["success"]
+                message = sanitization_result["message"]
 
-            if success:
-                updated_dataset_zip = sanitization_result["updated_dataset_zip"]
-                metadata_json = sanitization_result["metadata_json"]
-                self.update_metadata_job_id(metadata_json, job_id)
+                if success:
+                    updated_dataset_zip = sanitization_result["updated_dataset_zip"]
+                    metadata_json = sanitization_result["metadata_json"]
+                    self.update_metadata_job_id(metadata_json, job_id)
 
-                updated_dataset_path = self.upload_to_azure(job_id=job_id, file_path=updated_dataset_zip) or ""
-                metadata_path = self.upload_metadata_json(job_id=job_id, metadata_file_path=metadata_json) or ""
-                success = bool(updated_dataset_path and metadata_path)
-                if not success:
-                    message = "Failed to upload sanitized dataset artifacts"
+                    updated_dataset_path = self.upload_to_azure(job_id=job_id, file_path=updated_dataset_zip) or ""
+                    metadata_path = self.upload_metadata_json(job_id=job_id, metadata_file_path=metadata_json) or ""
+                    success = bool(updated_dataset_path and metadata_path)
+                    if not success:
+                        message = "Failed to upload sanitized dataset artifacts"
 
-            if not success and not message:
-                message = "Sanitization failed"
+                if not success and not message:
+                    message = "Sanitization failed"
 
         except Exception as exc:
             Logger.error(f"Error while processing message: {exc}")
@@ -170,18 +172,19 @@ class SanitizationService:
         filename = os.path.basename(parsed.path) or f"{job_id}.zip"
         local_file_path = os.path.join(target_directory, filename)
 
-        if parsed.scheme in ("http", "https"):
-            try:
-                with urlrequest.urlopen(input_path, timeout=120) as response, open(local_file_path, "wb") as output_file:
-                    shutil.copyfileobj(response, output_file)
-            except HTTPError as exc:
-                raise RuntimeError(f"HTTP download failed with status {exc.code}: {exc.reason}") from exc
-            except URLError as exc:
-                raise RuntimeError(f"URL download failed: {exc.reason}") from exc
-            except Exception as exc:
-                raise RuntimeError(f"Failed to download input file from URL: {exc}") from exc
-        else:
-            shutil.copy(input_path, local_file_path)
+        with Logger.timer(f"download_input_file (job_id={job_id})"):
+            if parsed.scheme in ("http", "https"):
+                try:
+                    with urlrequest.urlopen(input_path, timeout=120) as response, open(local_file_path, "wb") as output_file:
+                        shutil.copyfileobj(response, output_file)
+                except HTTPError as exc:
+                    raise RuntimeError(f"HTTP download failed with status {exc.code}: {exc.reason}") from exc
+                except URLError as exc:
+                    raise RuntimeError(f"URL download failed: {exc.reason}") from exc
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to download input file from URL: {exc}") from exc
+            else:
+                shutil.copy(input_path, local_file_path)
 
         Logger.info(f"Downloaded dataset to: {local_file_path}")
         return local_file_path
@@ -189,14 +192,15 @@ class SanitizationService:
     def upload_to_azure(self, job_id: str, file_path: str):
         Logger.info(f"Uploading file to Azure: {file_path}")
         try:
-            target_directory = f"jobs/{job_id}"
-            target_file_remote_path = f"{target_directory}/{os.path.basename(file_path)}"
+            with Logger.timer(f"upload_to_azure (job_id={job_id})"):
+                target_directory = f"jobs/{job_id}"
+                target_file_remote_path = f"{target_directory}/{os.path.basename(file_path)}"
 
-            container = self.storage_client.get_container(container_name=self.container_name)
-            file = container.create_file(name=target_file_remote_path)
-            with open(file_path, "rb") as data:
-                file.upload(data)
-            uploaded_url = file.get_remote_url()
+                container = self.storage_client.get_container(container_name=self.container_name)
+                file = container.create_file(name=target_file_remote_path)
+                with open(file_path, "rb") as data:
+                    file.upload(data)
+                uploaded_url = file.get_remote_url()
             Logger.info(f"File uploaded to Azure: {uploaded_url}")
             return uploaded_url
         except Exception as exc:
@@ -206,14 +210,15 @@ class SanitizationService:
     def upload_metadata_json(self, job_id: str, metadata_file_path: str):
         Logger.info(f"Uploading metadata JSON for job: {job_id}")
         try:
-            target_directory = f"jobs/{job_id}"
-            target_file_remote_path = f"{target_directory}/metadata.json"
+            with Logger.timer(f"upload_metadata_json (job_id={job_id})"):
+                target_directory = f"jobs/{job_id}"
+                target_file_remote_path = f"{target_directory}/metadata.json"
 
-            container = self.storage_client.get_container(container_name=self.container_name)
-            file = container.create_file(name=target_file_remote_path)
-            with open(metadata_file_path, "rb") as metadata_file:
-                file.upload(metadata_file)
-            uploaded_url = file.get_remote_url()
+                container = self.storage_client.get_container(container_name=self.container_name)
+                file = container.create_file(name=target_file_remote_path)
+                with open(metadata_file_path, "rb") as metadata_file:
+                    file.upload(metadata_file)
+                uploaded_url = file.get_remote_url()
             Logger.info(f"Metadata uploaded to Azure: {uploaded_url}")
             return uploaded_url
         except Exception as exc:

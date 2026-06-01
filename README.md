@@ -1,7 +1,7 @@
 # TDEI Sanitization Service
 [![Unit Tests](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/actions/workflows/unit_tests.yaml/badge.svg)](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/actions/workflows/unit_tests.yaml)
 [![Coverage](https://raw.githubusercontent.com/TaskarCenterAtUW/TDEI-sanitization-service/badges/coverage.svg)](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/tree/badges)
-[![python-ms-core](https://img.shields.io/pypi/v/python-ms-core?label=python-ms-core&cacheSeconds=60&t=1)](https://pypi.org/project/python-ms-core/)
+[![python-ms-core](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2FTaskarCenterAtUW%2FTDEI-sanitization-service%2Fmain%2Frequirements.txt&search=%28%3Fm%29%5Epython-ms-core%3D%3D%28%5B%5E%5Cr%5Cn%5D%2B%29&replace=%241&label=python-ms-core&color=blue)](https://pypi.org/project/python-ms-core/)
 
 A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW/GeoJSON dataset ZIP files, uploads the cleaned artifacts to Azure Blob Storage, and publishes the result back to a response topic.
 
