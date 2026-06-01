@@ -60,7 +60,8 @@ class SanitizationProcessor:
                     source_path = os.path.join(current_root, filename)
                     target_path = os.path.join(sanitized_root, filename)
                     if filename.lower().endswith(".geojson"):
-                        file_metadata = cls._sanitize_geojson_file(source_path, target_path)
+                        with Logger.timer(f"sanitize_geojson_file ({filename})"):
+                            file_metadata = cls._sanitize_geojson_file(source_path, target_path)
                         metadata["files"].append(file_metadata)
                         if file_metadata["removedTags"]:
                             change_summary["removed_values"] = True
