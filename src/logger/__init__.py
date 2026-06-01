@@ -1,4 +1,6 @@
 import logging
+import time
+from contextlib import contextmanager
 
 
 class Logger:
@@ -30,3 +32,27 @@ class Logger:
     @staticmethod
     def debug(message):
         Logger.configure_logger(level=logging.DEBUG).debug(message, stacklevel=2)
+
+    @staticmethod
+    @contextmanager
+    def timer(label: str):
+        """
+        Context manager that logs when a block of work starts and how long it
+        took. Logs an error and re-raises if the block fails, including the
+        elapsed time before failure.
+        """
+        Logger.configure_logger().info(f"[TIMER] {label} - in progress...", stacklevel=3)
+        start = time.perf_counter()
+        try:
+            yield
+        except Exception:
+            elapsed = time.perf_counter() - start
+            Logger.configure_logger().error(
+                f"[TIMER] {label} - FAILED after {elapsed:.3f}s", stacklevel=3
+            )
+            raise
+        else:
+            elapsed = time.perf_counter() - start
+            Logger.configure_logger().info(
+                f"[TIMER] {label} - completed in {elapsed:.3f}s", stacklevel=3
+            )
