@@ -24,9 +24,11 @@ class SanitizationService:
     _config = Settings()
 
     def __init__(self):
-        # python-ms-core defaults topic callback execution to process/fork.
-        # On macOS this can crash with objc fork-safety errors in callback workers.
-        os.environ["TOPIC_CALLBACK_EXECUTION_MODE"] = "thread"
+        # Keep Service Bus receiver and lock renewal in the parent process while
+        # long-running sanitization work runs in a Linux forked child process.
+        os.environ["TOPIC_CALLBACK_EXECUTION_MODE"] = "process"
+        os.environ["TOPIC_CALLBACK_PROCESS_START_METHOD"] = "fork"
+        os.environ["TOPIC_CALLBACK_PROCESS_FALLBACK_MODE"] = "error"
         self.core = Core()
         self._shutdown_triggered = threading.Event()
         self._subscription_name = self._config.event_bus.request_subscription
