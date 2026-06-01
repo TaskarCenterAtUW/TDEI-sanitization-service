@@ -1,3 +1,4 @@
+import gc
 import json
 import math
 import os
@@ -5,6 +6,8 @@ import shutil
 import zipfile
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, List
+
+import ijson
 
 from src.logger import Logger
 
@@ -86,44 +89,153 @@ class SanitizationProcessor:
 
     @classmethod
     def _sanitize_geojson_file(cls, source_path: str, target_path: str) -> Dict[str, Any]:
-        payload = cls._load_geojson_payload(source_path)
-
         file_metadata = {
             "filename": os.path.basename(source_path),
             "removedTags": [],
             "precisionUpdates": [],
         }
 
+        try:
+            cls._stream_sanitize_geojson(source_path, target_path, file_metadata)
+        except (UnicodeDecodeError, ijson.JSONError):
+            # Fallback for non-UTF-8 encodings (e.g. cp1252) or files ijson
+            # cannot stream (e.g. literal NaN tokens). Pay the memory cost
+            # rather than failing. Output is reopened with "w" so any partial
+            # streamed content is truncated and fully rewritten.
+            file_metadata["removedTags"].clear()
+            file_metadata["precisionUpdates"].clear()
+            cls._inmemory_sanitize_geojson(source_path, target_path, file_metadata)
+
+        gc.collect()
+        return file_metadata
+
+    @classmethod
+    def _stream_sanitize_geojson(
+        cls, source_path: str, target_path: str, file_metadata: Dict[str, Any]
+    ) -> None:
+        """
+        Stream-parse the input geojson and stream-write the sanitized output so
+        peak memory stays bounded by the size of the largest single feature
+        rather than the entire FeatureCollection.
+        """
+        with open(source_path, "rb") as source_file, open(
+            target_path, "w", encoding="utf-8"
+        ) as sanitized_geojson:
+            events = iter(ijson.parse(source_file, use_float=True))
+            sanitized_geojson.write("{")
+
+            prefix, event, value = next(events)
+            if event != "start_map":
+                raise ijson.JSONError("Top-level geojson is not an object")
+
+            first_top_key = True
+            feature_index = -1
+
+            for prefix, event, value in events:
+                if event == "end_map" and prefix == "":
+                    break
+                if event != "map_key" or prefix != "":
+                    raise ijson.JSONError(f"Unexpected event at root: {event}")
+
+                key = value
+                if not first_top_key:
+                    sanitized_geojson.write(",")
+                first_top_key = False
+                sanitized_geojson.write(json.dumps(key, ensure_ascii=True))
+                sanitized_geojson.write(":")
+
+                if key == "features":
+                    array_event = next(events)
+                    if array_event[1] != "start_array":
+                        raise ijson.JSONError("'features' is not an array")
+                    sanitized_geojson.write("[")
+                    first_feature = True
+
+                    for prefix, event, value in events:
+                        if event == "end_array":
+                            break
+                        feature = cls._build_value_from_events(events, prefix, event, value)
+                        feature_index += 1
+                        cls._sanitize_feature_inplace(feature, feature_index, file_metadata)
+
+                        if not first_feature:
+                            sanitized_geojson.write(",")
+                        first_feature = False
+                        cls._stream_json_with_decimal(feature, sanitized_geojson)
+                        del feature
+
+                    sanitized_geojson.write("]")
+                else:
+                    prefix, event, value = next(events)
+                    built = cls._build_value_from_events(events, prefix, event, value)
+                    cls._stream_json_with_decimal(built, sanitized_geojson)
+                    del built
+
+            sanitized_geojson.write("}")
+
+    @classmethod
+    def _build_value_from_events(cls, events, prefix: str, event: str, value: Any) -> Any:
+        if event in ("null", "boolean", "integer", "double", "number", "string"):
+            return value
+        if event == "start_map":
+            result: Dict[str, Any] = {}
+            for prefix, event, value in events:
+                if event == "end_map":
+                    return result
+                if event != "map_key":
+                    raise ijson.JSONError(f"Unexpected event in map: {event}")
+                key = value
+                next_prefix, next_event, next_value = next(events)
+                result[key] = cls._build_value_from_events(events, next_prefix, next_event, next_value)
+            return result
+        if event == "start_array":
+            result_list: List[Any] = []
+            for prefix, event, value in events:
+                if event == "end_array":
+                    return result_list
+                result_list.append(cls._build_value_from_events(events, prefix, event, value))
+            return result_list
+        raise ijson.JSONError(f"Unexpected event: {event}")
+
+    @classmethod
+    def _sanitize_feature_inplace(
+        cls, feature: Dict[str, Any], feature_index: int, file_metadata: Dict[str, Any]
+    ) -> None:
+        properties = feature.get("properties") or {}
+        sanitized_properties = {}
+        for tag, value in properties.items():
+            if cls._should_remove_value(value):
+                file_metadata["removedTags"].append(
+                    {
+                        "featureIndex": feature_index,
+                        "tag": tag,
+                        "value": value,
+                    }
+                )
+                continue
+            sanitized_properties[tag] = value
+        feature["properties"] = sanitized_properties
+
+        geometry = feature.get("geometry")
+        if geometry and "coordinates" in geometry:
+            geometry["coordinates"] = cls._sanitize_coordinates(
+                geometry["coordinates"],
+                feature_index,
+                "geometry.coordinates",
+                file_metadata["precisionUpdates"],
+            )
+
+    @classmethod
+    def _inmemory_sanitize_geojson(
+        cls, source_path: str, target_path: str, file_metadata: Dict[str, Any]
+    ) -> None:
+        payload = cls._load_geojson_payload(source_path)
         features = payload.get("features", [])
         for feature_index, feature in enumerate(features):
-            properties = feature.get("properties") or {}
-            sanitized_properties = {}
-            for tag, value in properties.items():
-                if cls._should_remove_value(value):
-                    file_metadata["removedTags"].append(
-                        {
-                            "featureIndex": feature_index,
-                            "tag": tag,
-                            "value": value,
-                        }
-                    )
-                    continue
-                sanitized_properties[tag] = value
-            feature["properties"] = sanitized_properties
-
-            geometry = feature.get("geometry")
-            if geometry and "coordinates" in geometry:
-                geometry["coordinates"] = cls._sanitize_coordinates(
-                    geometry["coordinates"],
-                    feature_index,
-                    "geometry.coordinates",
-                    file_metadata["precisionUpdates"],
-                )
-
+            cls._sanitize_feature_inplace(feature, feature_index, file_metadata)
         with open(target_path, "w", encoding="utf-8") as sanitized_geojson:
-            sanitized_geojson.write(cls._json_dumps_with_decimal(payload))
-
-        return file_metadata
+            cls._stream_json_with_decimal(payload, sanitized_geojson)
+        del payload
 
     @classmethod
     def _sanitize_coordinates(
@@ -236,14 +348,37 @@ class SanitizationProcessor:
         raise last_error or UnicodeDecodeError("utf-8", b"", 0, 1, "Unable to decode GeoJSON file")
 
     @classmethod
-    def _json_dumps_with_decimal(cls, value: Any) -> str:
+    def _stream_json_with_decimal(cls, value: Any, file_handle) -> None:
+        """
+        Serialize ``value`` directly to ``file_handle`` without materializing
+        the whole JSON document as a Python string. This keeps peak memory
+        bounded for large geojson payloads where the previous string-builder
+        approach could allocate multiple gigabytes.
+        """
+        write = file_handle.write
         if isinstance(value, dict):
-            items = []
+            write("{")
+            first = True
             for key, item in value.items():
-                items.append(f"{json.dumps(key, ensure_ascii=True)}:{cls._json_dumps_with_decimal(item)}")
-            return "{" + ",".join(items) + "}"
+                if not first:
+                    write(",")
+                first = False
+                write(json.dumps(key, ensure_ascii=True))
+                write(":")
+                cls._stream_json_with_decimal(item, file_handle)
+            write("}")
+            return
         if isinstance(value, list):
-            return "[" + ",".join(cls._json_dumps_with_decimal(item) for item in value) + "]"
+            write("[")
+            first = True
+            for item in value:
+                if not first:
+                    write(",")
+                first = False
+                cls._stream_json_with_decimal(item, file_handle)
+            write("]")
+            return
         if isinstance(value, Decimal):
-            return format(value, "f")
-        return json.dumps(value, ensure_ascii=True, allow_nan=False)
+            write(format(value, "f"))
+            return
+        write(json.dumps(value, ensure_ascii=True, allow_nan=False))
