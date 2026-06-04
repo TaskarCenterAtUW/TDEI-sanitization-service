@@ -1,0 +1,13 @@
+{
+  "messageId": "c8c76e89f30944d2b2abd2491bd95337",
+  "messageType": "workflow_identifier",
+  "data": {
+    "file_upload_path": "https://tdeisamplestorage.blob.core.windows.net/tdei-storage-test/Archivew.zip",
+    "user_id": "c59d29b6-a063-4249-943f-d320d15ac9ab",
+    "jobId": "<job_id>",
+    "success": true,
+    "message": "<sanitization_message>",
+    "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/<jobId>/filename.zip",
+    "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/<jobId>/metadata.json"
+  }
+}

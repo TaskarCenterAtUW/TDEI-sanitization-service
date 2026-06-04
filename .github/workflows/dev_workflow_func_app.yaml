@@ -1,0 +1,105 @@
+---
+# Dev Workflow – build image and deploy to Azure Function App (Development environment).
+#
+# Required secrets (Settings → Environments → Development → Environment secrets):
+#   - REGISTRY_DOMAIN      – Azure Container Registry login server (e.g. myregistry.azurecr.io)
+#   - REGISTRY_USERNAME    – ACR username
+#   - REGISTRY_PASSWORD    – ACR password
+#   - REGISTRY_REPO        – Repository name in ACR for this app
+#   - TDEI_CORE_AZURE_CREDS – Azure service principal JSON (for az login)
+#
+# Required variables (Settings → Environments → Development → Environment variables):
+#   - FUNCTION_APP_NAME    – Azure Function App name to deploy to
+#   - RESOURCE_GROUP       – Azure resource group containing the Function App
+#
+# Optional variables (defaults used if not set):
+#   - RESTART_APP          – Set to 'true' or 'false'; default 'true'
+#   - APP_SETTINGS_JSON    – JSON object of extra app settings to apply; default '{}'
+#
+######### Dev Workflow  ########
+on:
+  pull_request:
+    branches: [dev]
+    types:
+      - closed
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  Build:
+    environment: Development
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    steps:
+      - uses: actions/checkout@v2
+      - uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_DOMAIN }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Publish image to Azure Registry
+        run: |
+          docker build -t ${{ secrets.REGISTRY_DOMAIN }}/${{ secrets.REGISTRY_REPO }}:${{ github.sha }} -t ${{ secrets.REGISTRY_DOMAIN }}/${{ secrets.REGISTRY_REPO }}:${{ github.ref_name == 'main' && 'prod' || github.ref_name }}${{ github.ref_name != 'main' && '-latest' || 'latest' }} .
+          docker push ${{ secrets.REGISTRY_DOMAIN }}/${{ secrets.REGISTRY_REPO }} --all-tags
+  deploy:
+    environment: Development
+    runs-on: ubuntu-latest
+    needs: [Build]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2.0.0
+        with:
+          creds: ${{ secrets.TDEI_CORE_AZURE_CREDS }}
+
+      - name: Resolve deploy config from environment
+        id: deploy_config
+        run: |
+          echo "function_app_name=${{ vars.FUNCTION_APP_NAME }}" >> "$GITHUB_OUTPUT"
+          echo "resource_group=${{ vars.RESOURCE_GROUP }}" >> "$GITHUB_OUTPUT"
+          echo "aci_image=${{ secrets.REGISTRY_DOMAIN }}/${{ secrets.REGISTRY_REPO }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "restart_app=${{ vars.RESTART_APP || 'true' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log target environment
+        shell: bash
+        run: |
+          echo "Deploying to:"
+          echo "  Function App: ${{ steps.deploy_config.outputs.function_app_name }}"
+          echo "  Resource Group: ${{ steps.deploy_config.outputs.resource_group }}"
+          echo "  ACI_IMAGE: ${{ steps.deploy_config.outputs.aci_image }}"
+
+      - name: Update app settings (ACI_IMAGE + extras)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          app_settings = os.environ.get("APP_SETTINGS_JSON", "{}")
+          data = json.loads(app_settings) if app_settings else {}
+          data["ACI_IMAGE"] = os.environ["ACI_IMAGE"]
+          with open("/tmp/appsettings.txt", "w", encoding="utf-8") as handle:
+              for key, value in data.items():
+                  handle.write(f"{key}={value}\n")
+          PY
+          echo "Updating only provided settings (no clearing of others)."
+          az functionapp config appsettings set \
+            --name "${{ steps.deploy_config.outputs.function_app_name }}" \
+            --resource-group "${{ steps.deploy_config.outputs.resource_group }}" \
+            --settings $(cat /tmp/appsettings.txt | tr '\n' ' ')
+        env:
+          ACI_IMAGE: ${{ steps.deploy_config.outputs.aci_image }}
+          APP_SETTINGS_JSON: ${{ vars.APP_SETTINGS_JSON || '{}' }}
+
+      - name: Restart function app
+        if: ${{ steps.deploy_config.outputs.restart_app == 'true' }}
+        shell: bash
+        run: |
+          az functionapp restart \
+            --name "${{ steps.deploy_config.outputs.function_app_name }}" \
+            --resource-group "${{ steps.deploy_config.outputs.resource_group }}"

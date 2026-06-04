@@ -1,0 +1,50 @@
+---
+######### Stage Workflow  ########
+on:
+  pull_request:
+    branches: [stage]
+    types:
+      - closed
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  REGISTRY_IMAGE: ${{ secrets.REGISTRY_DOMAIN }}/${{ secrets.REGISTRY_REPO }}
+  IMAGE_SHA_TAG: ${{ github.sha }}
+  IMAGE_LATEST_TAG: stage-latest
+
+jobs:
+  Build:
+    environment: Stage
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    steps:
+      - uses: actions/checkout@v2
+      - uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_DOMAIN }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Publish image to Azure Registry
+        run: |
+          docker build -t $REGISTRY_IMAGE:$IMAGE_SHA_TAG -t $REGISTRY_IMAGE:$IMAGE_LATEST_TAG .
+          docker push $REGISTRY_IMAGE --all-tags
+
+  Deploy:
+    needs: Build
+    environment:
+      name: Stage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2.0.0
+        with:
+          creds: ${{secrets.TDEI_CORE_AZURE_CREDS}}
+      - name: Deploy to Stage
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          images: ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_SHA_TAG }}
