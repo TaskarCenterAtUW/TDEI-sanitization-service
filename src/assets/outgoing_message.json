@@ -8,6 +8,6 @@
     "success": true,
     "message": "<sanitization_message>",
     "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/<jobId>/filename.zip",
-    "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/<jobId>/metadata.json"
+    "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/<jobId>/fixes.json"
   }
 }

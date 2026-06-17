@@ -13,9 +13,9 @@ A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW
 2. **Downloads** the dataset ZIP from the URL in the message.
 3. **Extracts** the ZIP and processes every `.geojson` file inside it:
    - Removes properties whose value is JSON `null` or a numeric `NaN`; string values such as `"None"`, `"nan"`, `"none"`, `"null"`, `"n/a"`, and `"na"` are preserved.
-   - Normalizes all geometry coordinate values to exactly **7 decimal places** (truncates if more, pads with trailing zeroes if fewer).
+   - Normalizes geometry coordinate values to **at most 7 decimal places** (truncates if more); coordinates with fewer decimals keep their original precision and are never padded with trailing zeroes.
    - Skips macOS resource-fork files (`__MACOSX/`, `._*`, `.DS_Store`).
-4. **Writes** a `metadata.json` file that records every removed tag and every coordinate that was adjusted.
+4. **Writes** a `fixes.json` file that records every removed tag and every coordinate that was adjusted.
 5. **Repackages** the sanitized files into a new ZIP.
 6. **Uploads** both artifacts to Azure Blob Storage under `jobs/<jobId>/`.
 7. **Publishes** an outgoing message to a response topic with the result status and blob URLs.
@@ -37,12 +37,12 @@ Azure Service Bus (request topic)
         │                         ├─ extracts ZIP
         │                         ├─ per .geojson file:
         │                         │     remove null/NaN props
-        │                         │     normalise coords → 7 d.p.
+        │                         │     normalise coords → ≤7 d.p.
         │                         │     record changes
-        │                         ├─ write metadata.json
+        │                         ├─ write fixes.json
         │                         └─ repack sanitised ZIP
         │  uploads ZIP     →  jobs/<jobId>/<filename>.zip
-        │  uploads metadata →  jobs/<jobId>/metadata.json
+        │  uploads fixes    →  jobs/<jobId>/fixes.json
         ▼
 Azure Service Bus (response topic)
 ```
@@ -111,7 +111,7 @@ Azure Service Bus (response topic)
     "success": true,
     "message": "Coordinates were standardized for consistency.",
     "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/Archivew.zip",
-    "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/metadata.json"
+    "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/fixes.json"
   }
 }
 ```

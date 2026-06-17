@@ -15,7 +15,7 @@ class TestSanitizationProcessor(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("missing", result["message"].lower())
         self.assertIsNone(result["updated_dataset_zip"])
-        self.assertIsNone(result["metadata_json"])
+        self.assertIsNone(result["fixes_json"])
 
     def test_geojson_with_null_tags(self):
         payload = self._feature_collection(
@@ -43,6 +43,49 @@ class TestSanitizationProcessor(unittest.TestCase):
         self.assertEqual(result["message"], "Invalid or empty values were removed from the dataset.")
         self.assertTrue(math.isnan(metadata["files"][0]["removedTags"][0]["value"]))
 
+    def test_nan_coordinate_fails_with_located_message(self):
+        payload = self._feature_collection(
+            properties={"name": "edge"},
+            coordinates=[float("nan"), 47.1234567],
+        )
+
+        result = self._run_failing_sanitizer(payload)
+
+        self.assertFalse(result["success"])
+        self.assertIsNone(result["updated_dataset_zip"])
+        self.assertIsNone(result["fixes_json"])
+        self.assertIn("edges.geojson", result["message"])
+        self.assertIn("feature 0", result["message"])
+        self.assertIn("coordinates[0]", result["message"])
+        self.assertIn("NaN", result["message"])
+
+    def test_infinity_coordinate_fails_with_located_message(self):
+        payload = self._feature_collection(
+            properties={"name": "edge"},
+            coordinates=[[-122.1234567, 47.1234567], [float("inf"), 47.0]],
+        )
+
+        result = self._run_failing_sanitizer(payload)
+
+        self.assertFalse(result["success"])
+        self.assertIn("edges.geojson", result["message"])
+        self.assertIn("coordinates[1][0]", result["message"])
+        self.assertIn("Infinity", result["message"])
+
+    def test_infinity_property_fails_with_located_message(self):
+        payload = self._feature_collection(
+            properties={"name": "edge", "speed": float("inf")},
+            coordinates=[-122.1234567, 47.1234567],
+        )
+
+        result = self._run_failing_sanitizer(payload)
+
+        self.assertFalse(result["success"])
+        self.assertIsNone(result["updated_dataset_zip"])
+        self.assertIn("edges.geojson", result["message"])
+        self.assertIn("speed", result["message"])
+        self.assertIn("Infinity", result["message"])
+
     def test_geojson_with_coordinates_having_more_than_7_decimals(self):
         payload = self._feature_collection(
             properties={"name": "edge"},
@@ -58,6 +101,26 @@ class TestSanitizationProcessor(unittest.TestCase):
         )
         self.assertEqual(result["message"], "Coordinates were standardized for consistency.")
         self.assertEqual(len(metadata["files"][0]["precisionUpdates"]), 2)
+        precision_update = metadata["files"][0]["precisionUpdates"][0]
+        self.assertEqual(precision_update["coordinatePath"], "coordinates[0]")
+        self.assertEqual(precision_update["original"], "-122.123456789")
+        self.assertEqual(precision_update["updated"], "-122.1234567")
+        self.assertEqual(metadata["files"][0]["precisionUpdates"][1]["coordinatePath"], "coordinates[1]")
+        self.assertNotIn("geometry.coordinates", json.dumps(metadata))
+        # Only the non-empty change list is included for the file entry.
+        self.assertNotIn("removedTags", metadata["files"][0])
+
+    def test_fixes_entry_omits_empty_precision_updates(self):
+        payload = self._feature_collection(
+            properties={"name": "edge", "width": None},
+            coordinates=[-122.1234567, 47.1234567],
+        )
+
+        _, _, metadata, _ = self._run_sanitizer(payload)
+
+        file_entry = metadata["files"][0]
+        self.assertIn("removedTags", file_entry)
+        self.assertNotIn("precisionUpdates", file_entry)
 
     def test_geojson_with_coordinates_having_fewer_than_7_decimals(self):
         payload = self._feature_collection(
@@ -68,18 +131,51 @@ class TestSanitizationProcessor(unittest.TestCase):
         result, sanitized_payload, metadata, geojson_text = self._run_sanitizer(payload)
 
         self.assertTrue(result["success"])
+        # Coordinates with fewer than 7 decimals keep their original precision;
+        # no trailing zeros are appended and no precision update is recorded.
         self.assertEqual(
             sanitized_payload["features"][0]["geometry"]["coordinates"],
             [-122.1, 47.1234],
         )
-        self.assertEqual(result["message"], "Coordinates were standardized for consistency.")
-        self.assertEqual(len(metadata["files"][0]["precisionUpdates"]), 2)
-        self.assertEqual(metadata["files"][0]["precisionUpdates"][0]["original"], "-122.1")
-        self.assertEqual(metadata["files"][0]["precisionUpdates"][0]["updated"], "-122.1000000")
-        self.assertEqual(metadata["files"][0]["precisionUpdates"][1]["original"], "47.1234")
-        self.assertEqual(metadata["files"][0]["precisionUpdates"][1]["updated"], "47.1234000")
-        self.assertIn("-122.1000000", geojson_text)
-        self.assertIn("47.1234000", geojson_text)
+        self.assertEqual(result["message"], "No changes were needed. The dataset is already clean.")
+        self.assertEqual(metadata["files"], [])
+        self.assertNotIn("-122.1000000", geojson_text)
+        self.assertNotIn("47.1234000", geojson_text)
+        self.assertIn("-122.1", geojson_text)
+        self.assertIn("47.1234", geojson_text)
+
+    def test_geojson_coordinate_with_exactly_7_decimals_is_unchanged(self):
+        payload = self._feature_collection(
+            properties={"name": "edge"},
+            coordinates=[-122.1234567, 47.1234567],
+        )
+
+        result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            sanitized_payload["features"][0]["geometry"]["coordinates"],
+            [-122.1234567, 47.1234567],
+        )
+        self.assertEqual(metadata["files"], [])
+
+    def test_truncated_coordinate_drops_trailing_zeros(self):
+        payload = self._feature_collection(
+            properties={"name": "edge"},
+            coordinates=[-122.10000009, 47.1234567],
+        )
+
+        result, sanitized_payload, metadata, geojson_text = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        # 8 decimals -> truncate to 7 (-122.1000000) -> strip trailing zeros.
+        self.assertEqual(
+            sanitized_payload["features"][0]["geometry"]["coordinates"][0],
+            -122.1,
+        )
+        self.assertEqual(len(metadata["files"][0]["precisionUpdates"]), 1)
+        self.assertEqual(metadata["files"][0]["precisionUpdates"][0]["updated"], "-122.1")
+        self.assertNotIn("-122.1000000", geojson_text)
 
     def test_geojson_with_no_sanitization_needed(self):
         payload = self._feature_collection(
@@ -91,10 +187,35 @@ class TestSanitizationProcessor(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(result["message"], "No changes were needed. The dataset is already clean.")
-        self.assertEqual(metadata["files"][0]["removedTags"], [])
-        self.assertEqual(metadata["files"][0]["precisionUpdates"], [])
+        self.assertEqual(metadata["files"], [])
 
-    def test_metadata_file_creation(self):
+    def test_fixes_excludes_unchanged_files(self):
+        changed = self._feature_collection(
+            properties={"name": "edge"},
+            coordinates=[-122.123456789, 47.1234567],
+        )
+        unchanged = self._feature_collection(
+            properties={"name": "edge"},
+            coordinates=[-122.1234567, 47.1234567],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_zip_path = os.path.join(temp_dir, "input.zip")
+            output_dir = os.path.join(temp_dir, "output")
+            with zipfile.ZipFile(input_zip_path, "w") as zf:
+                zf.writestr("edges.geojson", json.dumps(changed))
+                zf.writestr("zones.geojson", json.dumps(unchanged))
+
+            result = SanitizationProcessor.sanitize_dataset(input_zip_path=input_zip_path, output_dir=output_dir)
+
+            self.assertTrue(result["success"])
+            with open(result["fixes_json"], "r", encoding="utf-8") as fixes_file:
+                fixes = json.load(fixes_file)
+
+        # Only the file with actual changes is recorded; the clean file is omitted.
+        self.assertEqual([entry["filename"] for entry in fixes["files"]], ["edges.geojson"])
+
+    def test_fixes_file_creation(self):
         payload = self._feature_collection(
             properties={"name": "edge", "width": None},
             coordinates=[-122.123456789, 47.1234567],
@@ -107,11 +228,13 @@ class TestSanitizationProcessor(unittest.TestCase):
 
             result = SanitizationProcessor.sanitize_dataset(input_zip_path=input_zip_path, output_dir=output_dir)
 
-            self.assertTrue(os.path.isfile(result["metadata_json"]))
-            with open(result["metadata_json"], "r", encoding="utf-8") as metadata_file:
-                metadata = json.load(metadata_file)
-            self.assertIn("files", metadata)
-            self.assertEqual(metadata["jobId"], "")
+            self.assertEqual(os.path.basename(result["fixes_json"]), "fixes.json")
+            self.assertTrue(os.path.isfile(result["fixes_json"]))
+            self.assertFalse(os.path.isfile(os.path.join(output_dir, "metadata.json")))
+            with open(result["fixes_json"], "r", encoding="utf-8") as fixes_file:
+                fixes = json.load(fixes_file)
+            self.assertIn("files", fixes)
+            self.assertEqual(fixes["jobId"], "")
 
     def test_zip_generation(self):
         payload = self._feature_collection(
@@ -174,7 +297,7 @@ class TestSanitizationProcessor(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("not found", result["message"].lower())
         self.assertIsNone(result["updated_dataset_zip"])
-        self.assertIsNone(result["metadata_json"])
+        self.assertIsNone(result["fixes_json"])
 
     def test_sanitize_dataset_copies_non_geojson_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -244,7 +367,7 @@ class TestSanitizationProcessor(unittest.TestCase):
 
     def test_sanitize_coordinates_ignores_non_numeric_non_list(self):
         updates = []
-        result = SanitizationProcessor._sanitize_coordinates("string-coord", 0, "geometry.coordinates", updates)
+        result = SanitizationProcessor._sanitize_coordinates("string-coord", 0, "coordinates", updates)
         self.assertEqual(result, "string-coord")
         self.assertEqual(updates, [])
 
@@ -276,10 +399,17 @@ class TestSanitizationProcessor(unittest.TestCase):
                     raw_text = geojson_file.read().decode("utf-8")
                     sanitized_payload = json.loads(raw_text)
 
-            with open(result["metadata_json"], "r", encoding="utf-8") as metadata_file:
-                metadata = json.load(metadata_file)
+            with open(result["fixes_json"], "r", encoding="utf-8") as fixes_file:
+                metadata = json.load(fixes_file)
 
             return result, sanitized_payload, metadata, raw_text
+
+    def _run_failing_sanitizer(self, geojson_payload):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_zip_path = os.path.join(temp_dir, "input.zip")
+            output_dir = os.path.join(temp_dir, "output")
+            self._write_zip_with_geojson(input_zip_path, geojson_payload)
+            return SanitizationProcessor.sanitize_dataset(input_zip_path=input_zip_path, output_dir=output_dir)
 
     def _assert_string_property_preserved(self, string_value):
         payload = self._feature_collection(
@@ -291,7 +421,7 @@ class TestSanitizationProcessor(unittest.TestCase):
 
         self.assertEqual(sanitized_payload["features"][0]["properties"]["bad_tag"], string_value)
         self.assertEqual(result["message"], "No changes were needed. The dataset is already clean.")
-        self.assertEqual(metadata["files"][0]["removedTags"], [])
+        self.assertEqual(metadata["files"], [])
 
     @staticmethod
     def _feature_collection(properties, coordinates):
