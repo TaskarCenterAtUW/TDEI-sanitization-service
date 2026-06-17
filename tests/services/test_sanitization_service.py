@@ -57,6 +57,34 @@ class TestSanitizationService(unittest.TestCase):
         )
         response_topic.publish.assert_called_once_with(data=payload)
 
+    @patch("src.services.sanitization_service.QueueMessage")
+    def test_send_status_blanks_urls_and_keeps_error_message_on_failure(self, queue_message_mock):
+        service = self._build_service_without_init()
+        service.core.get_topic.return_value = MagicMock()
+        queue_message_mock.data_from.side_effect = lambda payload: payload
+
+        request_msg = RequestMessage(
+            messageId="mid-fail",
+            messageType="workflow_identifier",
+            data=IncomingData(jobId="job-f", file_upload_path="https://example.com/input.zip", user_id="user-1"),
+        )
+
+        service.send_status(
+            valid=False,
+            status_message="edges.geojson: feature 0 has a non-finite coordinate (NaN) at coordinates[0]",
+            request_message=request_msg,
+            sanitization_dataset_url="",
+            metadata_url="",
+            original_file_upload_path="https://example.com/input.zip",
+        )
+
+        payload = queue_message_mock.data_from.call_args[0][0]["data"]
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["sanitization_dataset_url"], "")
+        self.assertEqual(payload["metadata_url"], "")
+        self.assertIn("non-finite coordinate", payload["message"])
+        self.assertIn("edges.geojson", payload["message"])
+
     def test_process_message_handles_none_data(self):
         service = self._build_service_without_init()
         service.cleanup = MagicMock()
@@ -133,21 +161,21 @@ class TestSanitizationService(unittest.TestCase):
         service.send_status = MagicMock()
         service.download_input_file = MagicMock(return_value="/tmp/input.zip")
         service.upload_to_azure = MagicMock(return_value="https://example.blob.core.windows.net/osw/jobs/job-4/input.zip")
-        service.upload_metadata_json = MagicMock(return_value="https://example.blob.core.windows.net/osw/jobs/job-4/metadata.json")
+        service.upload_fixes_json = MagicMock(return_value="https://example.blob.core.windows.net/osw/jobs/job-4/fixes.json")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             updated_dataset_zip = os.path.join(temp_dir, "input.zip")
-            metadata_json = os.path.join(temp_dir, "metadata.json")
+            fixes_json = os.path.join(temp_dir, "fixes.json")
             with open(updated_dataset_zip, "wb") as dataset_file:
                 dataset_file.write(b"zip-data")
-            with open(metadata_json, "w", encoding="utf-8") as metadata_file:
-                json.dump({"jobId": ""}, metadata_file)
+            with open(fixes_json, "w", encoding="utf-8") as fixes_file:
+                json.dump({"jobId": ""}, fixes_file)
 
             processor_mock.sanitize_dataset.return_value = {
                 "success": True,
                 "message": "Sanitization completed successfully",
                 "updated_dataset_zip": updated_dataset_zip,
-                "metadata_json": metadata_json,
+                "fixes_json": fixes_json,
             }
 
             request_msg = RequestMessage(
@@ -159,7 +187,7 @@ class TestSanitizationService(unittest.TestCase):
             service.process_message(request_msg)
 
         service.upload_to_azure.assert_called_once_with(job_id="job-4", file_path=updated_dataset_zip)
-        service.upload_metadata_json.assert_called_once_with(job_id="job-4", metadata_file_path=metadata_json)
+        service.upload_fixes_json.assert_called_once_with(job_id="job-4", fixes_file_path=fixes_json)
         kwargs = service.send_status.call_args.kwargs
         self.assertTrue(kwargs["valid"])
         self.assertEqual(
@@ -168,21 +196,21 @@ class TestSanitizationService(unittest.TestCase):
         )
         self.assertEqual(
             kwargs["metadata_url"],
-            "https://example.blob.core.windows.net/osw/jobs/job-4/metadata.json",
+            "https://example.blob.core.windows.net/osw/jobs/job-4/fixes.json",
         )
 
-    def test_update_metadata_job_id(self):
+    def test_update_fixes_job_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            metadata_path = os.path.join(temp_dir, "metadata.json")
-            with open(metadata_path, "w", encoding="utf-8") as metadata_file:
-                json.dump({"jobId": "", "files": []}, metadata_file)
+            fixes_path = os.path.join(temp_dir, "fixes.json")
+            with open(fixes_path, "w", encoding="utf-8") as fixes_file:
+                json.dump({"jobId": "", "files": []}, fixes_file)
 
-            SanitizationService.update_metadata_job_id(metadata_path, "job-9")
+            SanitizationService.update_fixes_job_id(fixes_path, "job-9")
 
-            with open(metadata_path, "r", encoding="utf-8") as metadata_file:
-                metadata = json.load(metadata_file)
+            with open(fixes_path, "r", encoding="utf-8") as fixes_file:
+                fixes = json.load(fixes_file)
 
-            self.assertEqual(metadata["jobId"], "job-9")
+            self.assertEqual(fixes["jobId"], "job-9")
 
     def test_subscribe_passes_max_receivable_messages(self):
         service = self._build_service_without_init()
@@ -292,7 +320,7 @@ class TestSanitizationService(unittest.TestCase):
             "success": False,
             "message": "",
             "updated_dataset_zip": None,
-            "metadata_json": None,
+            "fixes_json": None,
         }
 
         request_msg = RequestMessage(
@@ -313,21 +341,21 @@ class TestSanitizationService(unittest.TestCase):
         service.send_status = MagicMock()
         service.download_input_file = MagicMock(return_value="/tmp/input.zip")
         service.upload_to_azure = MagicMock(return_value=None)
-        service.upload_metadata_json = MagicMock(return_value=None)
+        service.upload_fixes_json = MagicMock(return_value=None)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             updated_dataset_zip = os.path.join(temp_dir, "input.zip")
-            metadata_json = os.path.join(temp_dir, "metadata.json")
+            fixes_json = os.path.join(temp_dir, "fixes.json")
             with open(updated_dataset_zip, "wb") as f:
                 f.write(b"zip")
-            with open(metadata_json, "w") as f:
+            with open(fixes_json, "w") as f:
                 json.dump({"jobId": ""}, f)
 
             processor_mock.sanitize_dataset.return_value = {
                 "success": True,
                 "message": "clean",
                 "updated_dataset_zip": updated_dataset_zip,
-                "metadata_json": metadata_json,
+                "fixes_json": fixes_json,
             }
 
             request_msg = RequestMessage(
@@ -468,32 +496,32 @@ class TestSanitizationService(unittest.TestCase):
 
         self.assertIsNone(result)
 
-    # ── upload_metadata_json ──────────────────────────────────────────────────
+    # ── upload_fixes_json ─────────────────────────────────────────────────────
 
-    def test_upload_metadata_json_success(self):
+    def test_upload_fixes_json_success(self):
         service = self._build_service_without_init()
         mock_file = MagicMock()
-        mock_file.get_remote_url.return_value = "https://blob/jobs/job-7/metadata.json"
+        mock_file.get_remote_url.return_value = "https://blob/jobs/job-7/fixes.json"
         mock_container = MagicMock()
         mock_container.create_file.return_value = mock_file
         service.storage_client = MagicMock()
         service.storage_client.get_container.return_value = mock_container
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            meta_path = os.path.join(temp_dir, "metadata.json")
-            with open(meta_path, "w") as f:
+            fixes_path = os.path.join(temp_dir, "fixes.json")
+            with open(fixes_path, "w") as f:
                 json.dump({"jobId": "job-7"}, f)
-            result = service.upload_metadata_json(job_id="job-7", metadata_file_path=meta_path)
+            result = service.upload_fixes_json(job_id="job-7", fixes_file_path=fixes_path)
 
-        self.assertEqual(result, "https://blob/jobs/job-7/metadata.json")
-        mock_container.create_file.assert_called_once_with(name="jobs/job-7/metadata.json")
+        self.assertEqual(result, "https://blob/jobs/job-7/fixes.json")
+        mock_container.create_file.assert_called_once_with(name="jobs/job-7/fixes.json")
 
-    def test_upload_metadata_json_returns_none_on_exception(self):
+    def test_upload_fixes_json_returns_none_on_exception(self):
         service = self._build_service_without_init()
         service.storage_client = MagicMock()
         service.storage_client.get_container.side_effect = Exception("storage error")
 
-        result = service.upload_metadata_json(job_id="job-8", metadata_file_path="/nonexistent/metadata.json")
+        result = service.upload_fixes_json(job_id="job-8", fixes_file_path="/nonexistent/fixes.json")
 
         self.assertIsNone(result)
 
