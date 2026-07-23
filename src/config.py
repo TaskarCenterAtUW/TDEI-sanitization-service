@@ -1,5 +1,4 @@
 import os
-from dataclasses import dataclass, field
 from typing import ClassVar
 
 from dotenv import load_dotenv
@@ -14,33 +13,6 @@ class EventBusSettings:
     request_subscription: str = os.environ.get("SANATIZATION_REQ_SUB", "")
     response_topic: str = os.environ.get("SANATIZATION_RES_TOPIC", "")
     container_name: str = os.environ.get("CONTAINER_NAME", "osw")
-
-
-@dataclass(frozen=True)
-class SanitizationConfig:
-    coordinate_precision: int = field(
-        default_factory=lambda: int(os.environ.get("SANITIZATION_COORDINATE_PRECISION", 7))
-    )
-    max_geometry_vertices: int = field(
-        default_factory=lambda: int(os.environ.get("SANITIZATION_MAX_GEOMETRY_VERTICES", 2000))
-    )
-    allow_zero_length_lines: bool = field(
-        default_factory=lambda: os.environ.get("SANITIZATION_ALLOW_ZERO_LENGTH_LINES", "false").lower()
-        in ("1", "true", "yes")
-    )
-
-    def __post_init__(self) -> None:
-        if isinstance(self.coordinate_precision, bool) or not isinstance(self.coordinate_precision, int):
-            raise TypeError("coordinate_precision must be an integer.")
-        if self.coordinate_precision < 0:
-            raise ValueError("coordinate_precision must be zero or greater.")
-        if isinstance(self.max_geometry_vertices, bool) or not isinstance(self.max_geometry_vertices, int):
-            raise TypeError("max_geometry_vertices must be an integer.")
-        if self.max_geometry_vertices < 2:
-            raise ValueError("max_geometry_vertices must be at least 2.")
-        if not isinstance(self.allow_zero_length_lines, bool):
-            raise TypeError("allow_zero_length_lines must be a boolean.")
-
 
 class Settings(BaseSettings):
     app_name: str = "python-osw-sanitization"

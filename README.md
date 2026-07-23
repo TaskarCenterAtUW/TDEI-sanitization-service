@@ -2,8 +2,9 @@
 [![Unit Tests](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/actions/workflows/unit_tests.yaml/badge.svg)](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/actions/workflows/unit_tests.yaml)
 [![Coverage](https://raw.githubusercontent.com/TaskarCenterAtUW/TDEI-sanitization-service/badges/coverage.svg)](https://github.com/TaskarCenterAtUW/TDEI-sanitization-service/tree/badges)
 [![python-ms-core](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2FTaskarCenterAtUW%2FTDEI-sanitization-service%2Fmain%2Frequirements.txt&search=%28%3Fm%29%5Epython-ms-core%3D%3D%28%5B%5E%5Cr%5Cn%5D%2B%29&replace=%241&label=python-ms-core&color=blue)](https://pypi.org/project/python-ms-core/)
+[![osw-sanitizer](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2FTaskarCenterAtUW%2FTDEI-sanitization-service%2Fmain%2Frequirements.txt&search=%28%3Fm%29%5Eosw-sanitizer%3D%3D%28%5B%5E%5Cr%5Cn%5D%2B%29&replace=%241&label=osw-sanitizer&color=blue)](https://pypi.org/project/osw-sanitizer/)
 
-A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW/GeoJSON dataset ZIP files, uploads the cleaned artifacts to Azure Blob Storage, and publishes the result back to a response topic.
+A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW/GeoJSON dataset ZIP files with `osw-sanitizer`, uploads the cleaned artifacts to Azure Blob Storage, and publishes the result back to a response topic.
 
 ---
 
@@ -11,7 +12,7 @@ A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW
 
 1. **Subscribes** to an Azure Service Bus topic for incoming sanitization requests.
 2. **Downloads** the dataset ZIP from the URL in the message.
-3. **Extracts** the ZIP and processes every `.geojson` file inside it:
+3. **Sanitizes** the dataset ZIP through `osw-sanitizer==0.1.1`:
    - Removes properties whose value is JSON `null` or a numeric `NaN`; string values such as `"None"`, `"nan"`, `"none"`, `"null"`, `"n/a"`, and `"na"` are preserved.
    - Normalizes geometry coordinate values to **at most 7 decimal places** by default (truncates if more); coordinates with fewer decimals keep their original precision and are never padded with trailing zeroes.
    - Removes zero-length edge `LineString` features.
@@ -37,11 +38,8 @@ Azure Service Bus (request topic)
   SanitizationService.process_message()
         │  validates jobId and file_upload_path
         │  downloads ZIP  →  SanitizationProcessor.sanitize_dataset()
-        │                         ├─ extracts ZIP
-        │                         ├─ per .geojson file:
-        │                         │     remove null/NaN props
-        │                         │     normalise coords → ≤7 d.p.
-        │                         │     record changes
+        │                         ├─ delegates to osw-sanitizer
+        │                         ├─ sanitizes OSW GeoJSON files
         │                         ├─ write fixes.json
         │                         └─ repack sanitised ZIP
         │  uploads ZIP     →  jobs/<jobId>/<filename>.zip
@@ -62,11 +60,13 @@ Azure Service Bus (response topic)
 
 ### Sanitization configuration
 
-| Environment variable | Default | Purpose |
+The service delegates sanitization to `osw-sanitizer==0.1.1` and uses the package defaults:
+
+| Package setting | Default | Purpose |
 |---|---:|---|
-| `SANITIZATION_COORDINATE_PRECISION` | `7` | Maximum decimal places retained for coordinate values. |
-| `SANITIZATION_MAX_GEOMETRY_VERTICES` | `2000` | Splits edge LineStrings with more vertices than this value. |
-| `SANITIZATION_ALLOW_ZERO_LENGTH_LINES` | `false` | Preserves zero-length edge LineStrings when set to `true`; otherwise they are removed. |
+| `coordinate_precision` | `7` | Maximum decimal places retained for coordinate values. |
+| `max_geometry_vertices` | `2000` | Splits edge LineStrings with more vertices than this value. |
+| `allow_zero_length_lines` | `false` | Preserves zero-length edge LineStrings when set to `true`; otherwise they are removed. |
 
 ### Metadata format
 
