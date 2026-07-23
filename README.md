@@ -65,8 +65,8 @@ Azure Service Bus (response topic)
 | Environment variable | Default | Purpose |
 |---|---:|---|
 | `SANITIZATION_COORDINATE_PRECISION` | `7` | Maximum decimal places retained for coordinate values. |
-| `SANITIZATION_ZERO_LENGTH_EDGE_THRESHOLD` | `0` | Removes edge LineStrings whose computed length is less than or equal to this value. |
-| `SANITIZATION_MAX_EDGE_VERTICES` | `2000` | Splits edge LineStrings with more vertices than this value. |
+| `SANITIZATION_MAX_GEOMETRY_VERTICES` | `2000` | Splits edge LineStrings with more vertices than this value. |
+| `SANITIZATION_ALLOW_ZERO_LENGTH_LINES` | `false` | Preserves zero-length edge LineStrings when set to `true`; otherwise they are removed. |
 
 ### Metadata format
 

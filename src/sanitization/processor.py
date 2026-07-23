@@ -376,7 +376,7 @@ class SanitizationProcessor:
                     "featureId": cls._feature_id(feature, feature_index),
                     "fixType": "zero_length_edge_removed",
                     "actualLength": cls._line_length(coordinates),
-                    "threshold": config.zero_length_edge_threshold,
+                    "allowZeroLengthLines": config.allow_zero_length_lines,
                     "action": "removed_feature",
                 }
             )
@@ -465,7 +465,7 @@ class SanitizationProcessor:
             return [feature]
 
         coordinates = geometry.get("coordinates")
-        if not isinstance(coordinates, list) or len(coordinates) <= config.max_edge_vertices:
+        if not isinstance(coordinates, list) or len(coordinates) <= config.max_geometry_vertices:
             return [feature]
 
         split_features = []
@@ -474,7 +474,7 @@ class SanitizationProcessor:
         part_number = 1
         original_id = cls._feature_id(feature, feature_index)
         while start_index < len(coordinates) - 1:
-            end_index = min(start_index + config.max_edge_vertices, len(coordinates))
+            end_index = min(start_index + config.max_geometry_vertices, len(coordinates))
             part = copy.deepcopy(feature)
             part["geometry"]["coordinates"] = coordinates[start_index:end_index]
             cls._set_split_feature_id(part, original_id, part_number)
@@ -495,7 +495,7 @@ class SanitizationProcessor:
                 "featureId": original_id,
                 "fixType": "oversized_edge_split",
                 "originalVertexCount": len(coordinates),
-                "maxVertexCount": config.max_edge_vertices,
+                "maxVertexCount": config.max_geometry_vertices,
                 "splitCount": len(split_features),
                 "generatedNodeIds": split_node_ids,
                 "generatedFeatureIds": [
@@ -510,6 +510,8 @@ class SanitizationProcessor:
     def _should_remove_zero_length_edge(
         cls, feature: Dict[str, Any], filename: str, config: SanitizationConfig
     ) -> bool:
+        if config.allow_zero_length_lines:
+            return False
         if cls._dataset_key_for_filename(filename) != "edges":
             return False
         geometry = feature.get("geometry") or {}
@@ -518,7 +520,7 @@ class SanitizationProcessor:
         coordinates = geometry.get("coordinates")
         if not isinstance(coordinates, list) or len(coordinates) < 2:
             return False
-        return cls._line_length(coordinates) <= config.zero_length_edge_threshold
+        return cls._line_length(coordinates) <= 0
 
     @staticmethod
     def _line_length(coordinates: Any) -> float:

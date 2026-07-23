@@ -385,7 +385,24 @@ class TestSanitizationProcessor(unittest.TestCase):
         removed_edge = metadata["files"][0]["removedEdges"][0]
         self.assertEqual(removed_edge["featureId"], "edge-1")
         self.assertEqual(removed_edge["fixType"], "zero_length_edge_removed")
-        self.assertEqual(removed_edge["threshold"], 0)
+        self.assertFalse(removed_edge["allowZeroLengthLines"])
+
+    def test_allow_zero_length_lines_preserves_zero_length_edge(self):
+        payload = self._feature_collection(
+            properties={"_id": "edge-1", "name": "edge"},
+            coordinates=[[-122.1, 47.1], [-122.1, 47.1]],
+            geometry_type="LineString",
+        )
+
+        with patch(
+            "src.sanitization.processor.SanitizationConfig",
+            return_value=SanitizationConfig(allow_zero_length_lines=True),
+        ):
+            result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(sanitized_payload["features"]), 1)
+        self.assertEqual(metadata["files"], [])
 
     def test_non_zero_length_edge_is_retained(self):
         payload = self._feature_collection(
@@ -407,7 +424,7 @@ class TestSanitizationProcessor(unittest.TestCase):
             geometry_type="LineString",
         )
 
-        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_edge_vertices=5)):
+        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_geometry_vertices=5)):
             result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
 
         self.assertTrue(result["success"])
@@ -422,7 +439,7 @@ class TestSanitizationProcessor(unittest.TestCase):
             geometry_type="LineString",
         )
 
-        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_edge_vertices=5)):
+        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_geometry_vertices=5)):
             result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
 
         self.assertTrue(result["success"])
@@ -454,7 +471,7 @@ class TestSanitizationProcessor(unittest.TestCase):
             geometry_type="Polygon",
         )
 
-        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_edge_vertices=5)):
+        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_geometry_vertices=5)):
             result, sanitized_payload, metadata, _ = self._run_sanitizer(payload, filename="polygons.geojson")
 
         self.assertTrue(result["success"])

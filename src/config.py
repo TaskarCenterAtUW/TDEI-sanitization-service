@@ -21,11 +21,12 @@ class SanitizationConfig:
     coordinate_precision: int = field(
         default_factory=lambda: int(os.environ.get("SANITIZATION_COORDINATE_PRECISION", 7))
     )
-    zero_length_edge_threshold: float = field(
-        default_factory=lambda: float(os.environ.get("SANITIZATION_ZERO_LENGTH_EDGE_THRESHOLD", 0))
+    max_geometry_vertices: int = field(
+        default_factory=lambda: int(os.environ.get("SANITIZATION_MAX_GEOMETRY_VERTICES", 2000))
     )
-    max_edge_vertices: int = field(
-        default_factory=lambda: int(os.environ.get("SANITIZATION_MAX_EDGE_VERTICES", 2000))
+    allow_zero_length_lines: bool = field(
+        default_factory=lambda: os.environ.get("SANITIZATION_ALLOW_ZERO_LENGTH_LINES", "false").lower()
+        in ("1", "true", "yes")
     )
 
     def __post_init__(self) -> None:
@@ -33,12 +34,12 @@ class SanitizationConfig:
             raise TypeError("coordinate_precision must be an integer.")
         if self.coordinate_precision < 0:
             raise ValueError("coordinate_precision must be zero or greater.")
-        if self.zero_length_edge_threshold < 0:
-            raise ValueError("zero_length_edge_threshold must be zero or greater.")
-        if isinstance(self.max_edge_vertices, bool) or not isinstance(self.max_edge_vertices, int):
-            raise TypeError("max_edge_vertices must be an integer.")
-        if self.max_edge_vertices < 2:
-            raise ValueError("max_edge_vertices must be at least 2.")
+        if isinstance(self.max_geometry_vertices, bool) or not isinstance(self.max_geometry_vertices, int):
+            raise TypeError("max_geometry_vertices must be an integer.")
+        if self.max_geometry_vertices < 2:
+            raise ValueError("max_geometry_vertices must be at least 2.")
+        if not isinstance(self.allow_zero_length_lines, bool):
+            raise TypeError("allow_zero_length_lines must be a boolean.")
 
 
 class Settings(BaseSettings):
