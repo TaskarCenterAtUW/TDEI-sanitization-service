@@ -13,9 +13,12 @@ A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW
 2. **Downloads** the dataset ZIP from the URL in the message.
 3. **Extracts** the ZIP and processes every `.geojson` file inside it:
    - Removes properties whose value is JSON `null` or a numeric `NaN`; string values such as `"None"`, `"nan"`, `"none"`, `"null"`, `"n/a"`, and `"na"` are preserved.
-   - Normalizes geometry coordinate values to **at most 7 decimal places** (truncates if more); coordinates with fewer decimals keep their original precision and are never padded with trailing zeroes.
+   - Normalizes geometry coordinate values to **at most 7 decimal places** by default (truncates if more); coordinates with fewer decimals keep their original precision and are never padded with trailing zeroes.
+   - Removes zero-length edge `LineString` features.
+   - Splits edge `LineString` features that exceed the configured vertex limit.
+   - Removes unsupported files from the sanitized output ZIP.
    - Skips macOS resource-fork files (`__MACOSX/`, `._*`, `.DS_Store`).
-4. **Writes** a `fixes.json` file that records every removed tag and every coordinate that was adjusted.
+4. **Writes** a `fixes.json` file that records every removed tag, coordinate adjustment, removed edge, split edge, and unsupported file removal.
 5. **Repackages** the sanitized files into a new ZIP.
 6. **Uploads** both artifacts to Azure Blob Storage under `jobs/<jobId>/`.
 7. **Publishes** an outgoing message to a response topic with the result status and blob URLs.
@@ -55,6 +58,15 @@ Azure Service Bus (response topic)
 | Coordinates only | `Coordinates were standardized for consistency.` |
 | Null/NaN tags only | `Invalid or empty values were removed from the dataset.` |
 | Both | `Dataset was cleaned and coordinates were standardized.` |
+| OSW compliance cleanup | `Dataset was sanitized for OSW compliance.` |
+
+### Sanitization configuration
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `SANITIZATION_COORDINATE_PRECISION` | `7` | Maximum decimal places retained for coordinate values. |
+| `SANITIZATION_ZERO_LENGTH_EDGE_THRESHOLD` | `0` | Removes edge LineStrings whose computed length is less than or equal to this value. |
+| `SANITIZATION_MAX_EDGE_VERTICES` | `2000` | Splits edge LineStrings with more vertices than this value. |
 
 ### Metadata format
 
@@ -75,6 +87,13 @@ Azure Service Bus (response topic)
           "updated": "-122.1234567"
         }
       ]
+    }
+  ],
+  "removedFiles": [
+    {
+      "filename": "readme.txt",
+      "fixType": "unsupported_file_removed",
+      "action": "removed_from_sanitized_output"
     }
   ]
 }

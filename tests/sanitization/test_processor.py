@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
+from src.config import SanitizationConfig
 from src.sanitization.processor import SanitizationProcessor
 
 
@@ -299,7 +301,7 @@ class TestSanitizationProcessor(unittest.TestCase):
         self.assertIsNone(result["updated_dataset_zip"])
         self.assertIsNone(result["fixes_json"])
 
-    def test_sanitize_dataset_copies_non_geojson_files(self):
+    def test_sanitize_dataset_removes_unsupported_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_zip_path = os.path.join(temp_dir, "input.zip")
             output_dir = os.path.join(temp_dir, "output")
@@ -308,7 +310,11 @@ class TestSanitizationProcessor(unittest.TestCase):
             result = SanitizationProcessor.sanitize_dataset(input_zip_path=input_zip_path, output_dir=output_dir)
             self.assertTrue(result["success"])
             with zipfile.ZipFile(result["updated_dataset_zip"], "r") as zf:
-                self.assertIn("readme.txt", zf.namelist())
+                self.assertNotIn("readme.txt", zf.namelist())
+            with open(result["fixes_json"], "r", encoding="utf-8") as fixes_file:
+                fixes = json.load(fixes_file)
+            self.assertEqual(fixes["removedFiles"][0]["filename"], "readme.txt")
+            self.assertEqual(fixes["removedFiles"][0]["fixType"], "unsupported_file_removed")
 
     def test_sanitize_dataset_skips_macos_dotfiles(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -365,9 +371,122 @@ class TestSanitizationProcessor(unittest.TestCase):
     def test_geojson_with_na_string_property_preserved(self):
         self._assert_string_property_preserved("na")
 
+    def test_zero_length_edge_is_removed_and_logged(self):
+        payload = self._feature_collection(
+            properties={"_id": "edge-1", "name": "edge"},
+            coordinates=[[-122.1, 47.1], [-122.1, 47.1]],
+            geometry_type="LineString",
+        )
+
+        result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(sanitized_payload["features"], [])
+        removed_edge = metadata["files"][0]["removedEdges"][0]
+        self.assertEqual(removed_edge["featureId"], "edge-1")
+        self.assertEqual(removed_edge["fixType"], "zero_length_edge_removed")
+        self.assertEqual(removed_edge["threshold"], 0)
+
+    def test_non_zero_length_edge_is_retained(self):
+        payload = self._feature_collection(
+            properties={"_id": "edge-1", "name": "edge"},
+            coordinates=[[-122.1, 47.1], [-122.2, 47.2]],
+            geometry_type="LineString",
+        )
+
+        result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(sanitized_payload["features"]), 1)
+        self.assertEqual(metadata["files"], [])
+
+    def test_edge_with_exactly_configured_vertex_limit_is_not_split(self):
+        payload = self._feature_collection(
+            properties={"_id": "edge-1", "name": "edge"},
+            coordinates=self._line_coordinates(5),
+            geometry_type="LineString",
+        )
+
+        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_edge_vertices=5)):
+            result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(sanitized_payload["features"]), 1)
+        self.assertEqual(len(sanitized_payload["features"][0]["geometry"]["coordinates"]), 5)
+        self.assertEqual(metadata["files"], [])
+
+    def test_edge_over_configured_vertex_limit_is_split_and_logged(self):
+        payload = self._feature_collection(
+            properties={"_id": "edge-1", "_u_id": "node-u", "_v_id": "node-v", "name": "edge"},
+            coordinates=self._line_coordinates(6),
+            geometry_type="LineString",
+        )
+
+        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_edge_vertices=5)):
+            result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        features = sanitized_payload["features"]
+        self.assertEqual(len(features), 2)
+        self.assertEqual(len(features[0]["geometry"]["coordinates"]), 5)
+        self.assertEqual(len(features[1]["geometry"]["coordinates"]), 2)
+        self.assertEqual(features[0]["properties"]["_id"], "edge-1-part-1")
+        self.assertEqual(features[1]["properties"]["_id"], "edge-1-part-2")
+        self.assertEqual(features[0]["properties"]["_u_id"], "node-u")
+        self.assertEqual(features[0]["properties"]["_v_id"], "edge-1-split-node-1")
+        self.assertEqual(features[1]["properties"]["_u_id"], "edge-1-split-node-1")
+        self.assertEqual(features[1]["properties"]["_v_id"], "node-v")
+        split_edge = metadata["files"][0]["splitEdges"][0]
+        self.assertEqual(split_edge["featureId"], "edge-1")
+        self.assertEqual(split_edge["originalVertexCount"], 6)
+        self.assertEqual(split_edge["maxVertexCount"], 5)
+        self.assertEqual(split_edge["splitCount"], 2)
+        self.assertEqual(split_edge["generatedNodeIds"], ["edge-1-split-node-1"])
+        nodes_payload = result["_zip_payloads"]["nodes.geojson"]
+        self.assertEqual(nodes_payload["features"][0]["properties"]["_id"], "edge-1-split-node-1")
+        self.assertEqual(nodes_payload["features"][0]["geometry"]["coordinates"], [4, 0.04])
+        self.assertEqual(metadata["files"][1]["addedNodes"][0]["featureId"], "edge-1-split-node-1")
+
+    def test_polygon_over_edge_vertex_limit_is_left_unchanged(self):
+        payload = self._feature_collection(
+            properties={"_id": "polygon-1", "name": "polygon"},
+            coordinates=[self._line_coordinates(6) + [[0, 0]]],
+            geometry_type="Polygon",
+        )
+
+        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(max_edge_vertices=5)):
+            result, sanitized_payload, metadata, _ = self._run_sanitizer(payload, filename="polygons.geojson")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(sanitized_payload["features"]), 1)
+        self.assertEqual(len(sanitized_payload["features"][0]["geometry"]["coordinates"][0]), 7)
+        self.assertEqual(metadata["files"], [])
+
+    def test_configured_coordinate_precision_is_used(self):
+        payload = self._feature_collection(
+            properties={"name": "edge"},
+            coordinates=[-122.1234567, 47.1234567],
+        )
+
+        with patch("src.sanitization.processor.SanitizationConfig", return_value=SanitizationConfig(coordinate_precision=6)):
+            result, sanitized_payload, metadata, _ = self._run_sanitizer(payload)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            sanitized_payload["features"][0]["geometry"]["coordinates"],
+            [-122.123456, 47.123456],
+        )
+        self.assertEqual(metadata["files"][0]["precisionUpdates"][0]["precision"], 6)
+
     def test_sanitize_coordinates_ignores_non_numeric_non_list(self):
         updates = []
-        result = SanitizationProcessor._sanitize_coordinates("string-coord", 0, "coordinates", updates)
+        result = SanitizationProcessor._sanitize_coordinates(
+            "string-coord",
+            0,
+            "coordinates",
+            updates,
+            SanitizationConfig(),
+        )
         self.assertEqual(result, "string-coord")
         self.assertEqual(updates, [])
 
@@ -384,20 +503,24 @@ class TestSanitizationProcessor(unittest.TestCase):
             with self.assertRaises(UnicodeDecodeError):
                 SanitizationProcessor._load_geojson_payload("/fake/path.geojson")
 
-    def _run_sanitizer(self, geojson_payload):
+    def _run_sanitizer(self, geojson_payload, filename="edges.geojson"):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_zip_path = os.path.join(temp_dir, "input.zip")
             output_dir = os.path.join(temp_dir, "output")
-            self._write_zip_with_geojson(input_zip_path, geojson_payload)
+            self._write_zip_with_geojson(input_zip_path, geojson_payload, filename=filename)
 
             result = SanitizationProcessor.sanitize_dataset(input_zip_path=input_zip_path, output_dir=output_dir)
 
             self.assertTrue(result["success"])
 
             with zipfile.ZipFile(result["updated_dataset_zip"], "r") as zip_file:
-                with zip_file.open("edges.geojson") as geojson_file:
+                with zip_file.open(filename) as geojson_file:
                     raw_text = geojson_file.read().decode("utf-8")
                     sanitized_payload = json.loads(raw_text)
+                result["_zip_payloads"] = {}
+                if "nodes.geojson" in zip_file.namelist():
+                    with zip_file.open("nodes.geojson") as nodes_file:
+                        result["_zip_payloads"]["nodes.geojson"] = json.load(nodes_file)
 
             with open(result["fixes_json"], "r", encoding="utf-8") as fixes_file:
                 metadata = json.load(fixes_file)
@@ -424,7 +547,7 @@ class TestSanitizationProcessor(unittest.TestCase):
         self.assertEqual(metadata["files"], [])
 
     @staticmethod
-    def _feature_collection(properties, coordinates):
+    def _feature_collection(properties, coordinates, geometry_type="Point"):
         return {
             "type": "FeatureCollection",
             "features": [
@@ -432,7 +555,7 @@ class TestSanitizationProcessor(unittest.TestCase):
                     "type": "Feature",
                     "properties": properties,
                     "geometry": {
-                        "type": "Point",
+                        "type": geometry_type,
                         "coordinates": coordinates,
                     },
                 }
@@ -440,14 +563,18 @@ class TestSanitizationProcessor(unittest.TestCase):
         }
 
     @staticmethod
-    def _write_zip_with_geojson(zip_path, payload, encoding="utf-8"):
+    def _line_coordinates(count):
+        return [[index, index * 0.01] for index in range(count)]
+
+    @staticmethod
+    def _write_zip_with_geojson(zip_path, payload, encoding="utf-8", filename="edges.geojson"):
         with tempfile.TemporaryDirectory() as staging_dir:
             geojson_path = os.path.join(staging_dir, "edges.geojson")
             with open(geojson_path, "w", encoding=encoding) as geojson_file:
                 json.dump(payload, geojson_file, allow_nan=True, ensure_ascii=False)
 
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                zip_file.write(geojson_path, "edges.geojson")
+                zip_file.write(geojson_path, filename)
 
     @staticmethod
     def _write_zip_with_macosx_sidecar(zip_path, payload):
