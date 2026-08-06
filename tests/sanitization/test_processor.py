@@ -33,13 +33,13 @@ class TestSanitizationProcessor(unittest.TestCase):
     def test_sanitize_dataset_forwards_config_to_osw_sanitizer_package(self, sanitizer_mock):
         config = SanitizationConfig(
             coordinate_precision=7,
-            max_geometry_vertices=2000,
-            allow_zero_length_lines=False,
+            coordinate_rounding="truncate",
+            validate_output=False,
         )
         sanitizer_mock.sanitize_dataset.return_value = {
             "success": True,
             "message": "Dataset was sanitized for OSW compliance.",
-            "updated_dataset_zip": "/tmp/output/input.zip",
+            "updated_dataset_zip": "/tmp/output/osw_data.zip",
             "fixes_json": "/tmp/output/fixes.json",
         }
 
