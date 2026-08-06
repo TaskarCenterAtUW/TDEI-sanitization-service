@@ -12,16 +12,17 @@ A FastAPI microservice that listens to an Azure Service Bus topic, sanitizes OSW
 
 1. **Subscribes** to an Azure Service Bus topic for incoming sanitization requests.
 2. **Downloads** the dataset ZIP from the URL in the message.
-3. **Sanitizes** the dataset ZIP through `osw-sanitizer==0.1.1`:
-   - Removes properties whose value is JSON `null` or a numeric `NaN`; string values such as `"None"`, `"nan"`, `"none"`, `"null"`, `"n/a"`, and `"na"` are preserved.
-   - Normalizes geometry coordinate values to **at most 7 decimal places** by default (truncates if more); coordinates with fewer decimals keep their original precision and are never padded with trailing zeroes.
-   - Removes zero-length edge `LineString` features.
-   - Splits edge `LineString` features that exceed the configured vertex limit.
-   - Removes unsupported files from the sanitized output ZIP.
-   - Skips macOS resource-fork files (`__MACOSX/`, `._*`, `.DS_Store`).
-4. **Writes** a `fixes.json` file that records every removed tag, coordinate adjustment, removed edge, split edge, and unsupported file removal.
-5. **Repackages** the sanitized files into a new ZIP.
-6. **Uploads** both artifacts to Azure Blob Storage under `jobs/<jobId>/`.
+3. **Sanitizes** the dataset ZIP through `osw-sanitizer==0.2.0`:
+   - Removes unsupported files from the sanitized output ZIP and skips macOS packaging metadata (`__MACOSX/`, `._*`, `.DS_Store`).
+   - Removes properties whose value is JSON `null` or a numeric `NaN`; string values such as `"None"`, `"nan"`, `"none"`, `"null"`, `"n/a"`, and `"na"` are preserved, as are falsy but meaningful values (`0`, `false`, `""`).
+   - Normalizes geometry coordinate values to **at most 7 decimal places** by default (rounds by default, truncation is configurable); coordinates with fewer decimals keep their original precision and are never padded with trailing zeroes.
+   - Creates missing nodes for every `_u_id` / `_v_id` / `_w_id` that no node declares.
+   - Enforces unique node `_id`s — identical repeats are dropped, conflicting ones re-ided.
+   - Collapses duplicate nodes that share coordinates and tags, repointing references at the survivor.
+   - Verifies the node reference graph is intact, then validates the sanitized dataset with `python-osw-validation`.
+4. **Writes** a `fixes.json` file that records every removed tag, coordinate adjustment, added/updated/collapsed node, and unsupported file removal, plus a `validation_issues.json` with the validator's findings.
+5. **Repackages** the sanitized files into a new ZIP and bundles that ZIP together with `fixes.json` and `validation_issues.json` into `osw_data.zip`.
+6. **Uploads** `osw_data.zip` and `fixes.json` to Azure Blob Storage under `jobs/<jobId>/`.
 7. **Publishes** an outgoing message to a response topic with the result status and blob URLs.
 
 ---
@@ -41,8 +42,10 @@ Azure Service Bus (request topic)
         │                         ├─ delegates to osw-sanitizer
         │                         ├─ sanitizes OSW GeoJSON files
         │                         ├─ write fixes.json
-        │                         └─ repack sanitised ZIP
-        │  uploads ZIP     →  jobs/<jobId>/<filename>.zip
+        │                         ├─ repack sanitised ZIP
+        │                         ├─ validate with python-osw-validation
+        │                         └─ bundle osw_data.zip
+        │  uploads bundle  →  jobs/<jobId>/osw_data.zip
         │  uploads fixes    →  jobs/<jobId>/fixes.json
         ▼
 Azure Service Bus (response topic)
@@ -58,15 +61,19 @@ Azure Service Bus (response topic)
 | Both | `Dataset was cleaned and coordinates were standardized.` |
 | OSW compliance cleanup | `Dataset was sanitized for OSW compliance.` |
 
+When the sanitized dataset fails OSW validation the result is unsuccessful and the message carries the validator's issues instead of one of the summaries above.
+
 ### Sanitization configuration
 
-The service delegates sanitization to `osw-sanitizer==0.1.1` and uses the package defaults:
+The service delegates sanitization to `osw-sanitizer==0.2.0` and uses the package defaults:
 
 | Package setting | Default | Purpose |
 |---|---:|---|
 | `coordinate_precision` | `7` | Maximum decimal places retained for coordinate values. |
-| `max_geometry_vertices` | `2000` | Splits edge LineStrings with more vertices than this value. |
-| `allow_zero_length_lines` | `false` | Preserves zero-length edge LineStrings when set to `true`; otherwise they are removed. |
+| `coordinate_rounding` | `round` | `round` moves a too-long coordinate to the nearest value at the configured precision; `truncate` drops the extra digits. |
+| `validate_output` | `true` | Validates the sanitized dataset with `python-osw-validation` and publishes the `osw_data.zip` bundle. When `false`, the sanitized dataset ZIP itself is the published artifact. |
+
+> Geometry splitting and zero-length line removal were dropped in `osw-sanitizer` 0.2.0 — features are never split, regardless of vertex count, so `max_geometry_vertices` and `allow_zero_length_lines` no longer exist.
 
 ### Metadata format
 
@@ -99,6 +106,8 @@ The service delegates sanitization to `osw-sanitizer==0.1.1` and uses the packag
 }
 ```
 
+Node repairs are recorded per file alongside the entries above, under `addedNodes`, `addedNodeReferences`, `unresolvedReferences`, `removedNodes`, `reassignedNodeIds`, `collapsedNodes`, and `updatedReferences`. Each entry carries a `fixType` (`missing_node_created`, `reference_id_missing`, `reference_coordinate_unknown`, `duplicate_node_removed`, `duplicate_node_id_reassigned`, `duplicate_node_collapsed`, `collapsed_node_reference_updated`) and an `action`.
+
 ---
 
 ## Message contracts
@@ -129,7 +138,7 @@ The service delegates sanitization to `osw-sanitizer==0.1.1` and uses the packag
     "user_id": "c59d29b6-a063-4249-943f-d320d15ac9ab",
     "success": true,
     "message": "Coordinates were standardized for consistency.",
-    "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/Archivew.zip",
+    "sanitization_dataset_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/osw_data.zip",
     "metadata_url": "https://tdeisamplestorage.blob.core.windows.net/osw/jobs/0001/fixes.json"
   }
 }
