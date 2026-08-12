@@ -5,4 +5,4 @@ pydantic
 pydantic-settings
 python-dotenv
 psutil
-osw-sanitizer==0.2.0
+osw-sanitizer==0.2.1
