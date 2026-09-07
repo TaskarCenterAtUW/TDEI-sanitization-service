@@ -14,7 +14,6 @@ class EventBusSettings:
     response_topic: str = os.environ.get("SANATIZATION_RES_TOPIC", "")
     container_name: str = os.environ.get("CONTAINER_NAME", "osw")
 
-
 class Settings(BaseSettings):
     app_name: str = "python-osw-sanitization"
     event_bus: ClassVar[EventBusSettings] = EventBusSettings()

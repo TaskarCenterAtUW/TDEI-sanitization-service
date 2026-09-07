@@ -70,7 +70,7 @@ class SanitizationService:
         success = False
         message = ""
         updated_dataset_path = ""
-        metadata_path = ""
+        fixes_path = ""
 
         job_work_dir = os.path.join(self._config.get_download_directory(), job_id or "unknown-job")
         local_input_file = None
@@ -100,12 +100,12 @@ class SanitizationService:
 
                 if success:
                     updated_dataset_zip = sanitization_result["updated_dataset_zip"]
-                    metadata_json = sanitization_result["metadata_json"]
-                    self.update_metadata_job_id(metadata_json, job_id)
+                    fixes_json = sanitization_result["fixes_json"]
+                    self.update_fixes_job_id(fixes_json, job_id)
 
                     updated_dataset_path = self.upload_to_azure(job_id=job_id, file_path=updated_dataset_zip) or ""
-                    metadata_path = self.upload_metadata_json(job_id=job_id, metadata_file_path=metadata_json) or ""
-                    success = bool(updated_dataset_path and metadata_path)
+                    fixes_path = self.upload_fixes_json(job_id=job_id, fixes_file_path=fixes_json) or ""
+                    success = bool(updated_dataset_path and fixes_path)
                     if not success:
                         message = "Failed to upload sanitized dataset artifacts"
 
@@ -122,7 +122,7 @@ class SanitizationService:
                 status_message=message,
                 request_message=request_msg,
                 sanitization_dataset_url=updated_dataset_path,
-                metadata_url=metadata_path,
+                metadata_url=fixes_path,
                 original_file_upload_path=input_path or "",
             )
             self.cleanup(path=job_work_dir)
@@ -209,31 +209,31 @@ class SanitizationService:
             Logger.error(f"Upload failed: {exc}")
             return None
 
-    def upload_metadata_json(self, job_id: str, metadata_file_path: str):
-        Logger.info(f"Uploading metadata JSON for job: {job_id}")
+    def upload_fixes_json(self, job_id: str, fixes_file_path: str):
+        Logger.info(f"Uploading fixes JSON for job: {job_id}")
         try:
-            with Logger.timer(f"upload_metadata_json (job_id={job_id})"):
+            with Logger.timer(f"upload_fixes_json (job_id={job_id})"):
                 target_directory = f"jobs/{job_id}"
-                target_file_remote_path = f"{target_directory}/metadata.json"
+                target_file_remote_path = f"{target_directory}/fixes.json"
 
                 container = self.storage_client.get_container(container_name=self.container_name)
                 file = container.create_file(name=target_file_remote_path)
-                with open(metadata_file_path, "rb") as metadata_file:
-                    file.upload(metadata_file)
+                with open(fixes_file_path, "rb") as fixes_file:
+                    file.upload(fixes_file)
                 uploaded_url = file.get_remote_url()
-            Logger.info(f"Metadata uploaded to Azure: {uploaded_url}")
+            Logger.info(f"Fixes uploaded to Azure: {uploaded_url}")
             return uploaded_url
         except Exception as exc:
-            Logger.error(f"Metadata upload failed: {exc}")
+            Logger.error(f"Fixes upload failed: {exc}")
             return None
 
     @staticmethod
-    def update_metadata_job_id(metadata_file_path: str, job_id: str) -> None:
-        with open(metadata_file_path, "r", encoding="utf-8") as metadata_file:
-            metadata = json.load(metadata_file)
-        metadata["jobId"] = job_id
-        with open(metadata_file_path, "w", encoding="utf-8") as metadata_file:
-            json.dump(metadata, metadata_file, indent=2, ensure_ascii=True)
+    def update_fixes_job_id(fixes_file_path: str, job_id: str) -> None:
+        with open(fixes_file_path, "r", encoding="utf-8") as fixes_file:
+            fixes = json.load(fixes_file)
+        fixes["jobId"] = job_id
+        with open(fixes_file_path, "w", encoding="utf-8") as fixes_file:
+            json.dump(fixes, fixes_file, indent=2, ensure_ascii=True)
 
     def cleanup(self, path: str) -> None:
         if os.path.exists(path):
